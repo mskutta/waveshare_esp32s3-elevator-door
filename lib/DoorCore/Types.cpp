@@ -1,0 +1,83 @@
+#include "Types.h"
+#include <string.h>
+#include <math.h>
+#include <initializer_list>
+#include "MotionFields.h"
+
+const char *eventName(size_t e) {
+  static const char *names[] = {"unknown", "homing", "close", "closed", "closing", "open", "opening", "reopen", "reopening", "waiting", "fault", "forced"};
+  return e < kEventCount ? names[e] : "invalid";
+}
+AppConfig defaultConfig(bool rear) {
+  AppConfig c{};
+  c.motion = {18600, rear ? 20000000u : 90000000u, 90000000, 30000000, 10000000,
+    400000, 700000, 100000, 100000, 100000, 100000, 1500, 900, 1500,
+    rear ? 5000u : 600000u, 2000, 250, 30000, 30000, 5000, 64, 128};
+  c.network.dhcp = true;
+  strcpy(c.network.ip, rear ? "192.168.1.51" : "192.168.1.50"); strcpy(c.network.mask, "255.255.255.0");
+  strcpy(c.network.gateway, "192.168.1.1"); strcpy(c.network.dns, "192.168.1.1");
+  c.qlab.port = 53000; c.qlab.closedExpiryMs = 30000;
+  return c;
+}
+bool parseIPv4(const char *s, uint32_t &ip) {
+  ip = 0;
+  for (int i = 0; i < 4; ++i) {
+    unsigned part = 0, digits = 0;
+    while (*s >= '0' && *s <= '9') { part = part * 10 + (*s++ - '0'); if (++digits > 3 || part > 255) return false; }
+    if (!digits) return false;
+    ip = (ip << 8) | part;
+    if (i < 3) { if (*s++ != '.') return false; } else if (*s) return false;
+  }
+  return true;
+}
+static bool segment(const char *s, bool uuid = false) {
+  if (!*s) return false;
+  for (; *s; ++s) if (!((*s >= 'a' && *s <= 'z') || (*s >= 'A' && *s <= 'Z') ||
+      (*s >= '0' && *s <= '9') || *s == '-' || (!uuid && (*s == '.' || *s == '_')))) return false;
+  return true;
+}
+bool sameMotion(const MotionConfig &a, const MotionConfig &b) {
+#define COMPARE(name) if(a.name!=b.name) return false;
+  MOTION_FIELDS(COMPARE)
+#undef COMPARE
+  return true;
+}
+bool validateConfig(const AppConfig &c, const char *&error) {
+  const auto &m = c.motion;
+  error = "invalid motion settings";
+  if (m.travel < 160 || m.travel > 1000000 || m.closeDrift < 1 || m.openDrift < 1 ||
+      m.closeDrift >= m.travel || m.openDrift >= m.travel) return false;
+  for (auto v : {m.openSpeed, m.reopenSpeed, m.closeSpeed, m.homingSpeed}) if (v < 10000 || v > 500000000) return false;
+  for (auto v : {m.openAccel, m.openDecel, m.closeAccel, m.closeDecel, m.homingAccel, m.homingDecel}) if (v < 100 || v > 2147483647u) return false;
+  for (auto v : {m.openCurrent, m.closeCurrent, m.homingCurrent}) if (v < 100 || v > 3093) return false;
+  for (auto v : {m.dwellMs, m.shortDwellMs}) if (v < 100 || v > 3600000) return false;
+  if (m.settleMs > 5000) return false;
+  for (auto v : {m.openTimeoutMs, m.closeTimeoutMs, m.homingTimeoutMs}) if (v < 100 || v > 600000) return false;
+  // Reject deadlines below even an ideal, zero-start-speed trapezoidal move.
+  auto minimumMs = [&](uint32_t speed, uint32_t accel, uint32_t decel) {
+    double v = speed / 10000.0, a = accel / 100.0, d = decel / 100.0;
+    double ramp = v*v/(2*a) + v*v/(2*d);
+    double seconds = ramp <= m.travel ? v/a + v/d + (m.travel-ramp)/v :
+      sqrt(2.0*m.travel/(1.0/a+1.0/d))*(1.0/a+1.0/d);
+    return seconds * 1000.0;
+  };
+  if (m.openTimeoutMs <= minimumMs(m.openSpeed,m.openAccel,m.openDecel) ||
+      m.openTimeoutMs <= minimumMs(m.reopenSpeed,m.openAccel,m.openDecel) ||
+      m.closeTimeoutMs <= minimumMs(m.closeSpeed,m.closeAccel,m.closeDecel)) return false;
+  error = "invalid network settings";
+  uint32_t ip, mask, gw, dns;
+  if (!parseIPv4(c.network.ip,ip) || !parseIPv4(c.network.mask,mask) ||
+      !parseIPv4(c.network.gateway,gw) || !parseIPv4(c.network.dns,dns)) return false;
+  if (!c.network.dhcp) {
+    uint32_t host = ~mask;
+    if (!mask || mask == UINT32_MAX || (host & (host+1)) ||
+        (ip & host) == 0 || (ip & host) == host || (ip >> 24) == 0 || (ip >> 24) >= 224 ||
+        (gw && ((gw & mask) != (ip & mask) || (gw & host) == 0 || (gw & host) == host))) return false;
+  }
+  error = "invalid QLab settings";
+  if (!c.qlab.port || c.qlab.closedExpiryMs < 100 || c.qlab.closedExpiryMs > 3600000) return false;
+  if (c.qlab.enabled && (!c.qlab.host[0] || !segment(c.qlab.workspace,true))) return false;
+  for (const char *p=c.qlab.host; *p; ++p) if (!( (*p>='a'&&*p<='z') || (*p>='A'&&*p<='Z') || (*p>='0'&&*p<='9') || *p=='.' || *p=='-')) return false;
+  for (auto &mapping : c.qlab.events) if (mapping.enabled && !segment(mapping.cue)) return false;
+  error = nullptr; return true;
+}

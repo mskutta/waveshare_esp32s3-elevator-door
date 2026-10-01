@@ -1,0 +1,44 @@
+# QLab 5 setup
+
+Use direct Ethernet between controllers and the show-control network. Give each controller a DHCP reservation or configured static IP; keep QLab's wired interface on the same reachable network.
+
+## QLab → door
+
+In QLab Workspace Settings → Network → Network Outputs, add a patch to each controller's IP and TCP port **53000**. Select **OSC over TCP, SLIP (OSC 1.1)** framing. Do not select UDP, plain text, or OSC 1.0 length-prefix framing.
+
+Create a Network cue containing exactly one of:
+
+```text
+/elev-door-front/door/open
+/elev-door-rear/door/open
+```
+
+Send no arguments. Disable duration/resend behavior; repeated messages intentionally do not extend dwell. Opening from closed and reopening during closing are local behaviors. Commands received before closed-position confirmation or during a settings reservation are ignored. There is no close, hold, stop, or homing command.
+
+## Door → QLab
+
+Configure the controller's QLab host, TCP OSC port (default **53000**), workspace unique ID, and optional OSC passcode. Configure the workspace's OSC Access permissions to allow control via the supplied passcode, or via passcode-less connections if no passcode is set. In particular, cue starts must be permitted. Use the workspace ID, not its title; `/workspaces` in QLab's OSC API can enumerate IDs.
+
+Each enabled event maps to one cue number. Use a QLab Group cue for multiple actions. The firmware connects to `/workspace/<id>/connect`, enables `/alwaysReply 1`, then queries `/alwaysReply` and waits for confirmation before becoming ready. It sends cue starts as:
+
+```text
+/workspace/<id>/cue/<cue-number>/start
+```
+
+Default JSON replies are required. The controller validates the reply envelope, invoked method, optional workspace ID, and successful status. Avoid changing `/replyFormat` for this connection. Invalid passcodes, denied permissions, and QLab errors appear in diagnostics; authentication errors back off for 30 seconds. Connection/reply timeouts reconnect after 2.5 seconds. TCP connect, transmit, and receive are nonblocking; hostname lookup can wait on the separate network core without stopping motor control.
+
+Events offered for mapping: `unknown`, `homing`, `close` (settling before closing), `closed`, `closing`, `open` (settling before opening), `opening`, `reopen`, `reopening`, `waiting`, `fault`, and `forced`. States describe the preserved firmware transitions: **`open` is not an open-limit confirmation**. There is no open limit switch. Use `waiting` for the completion of opening, noting that it can also follow forced movement.
+
+## The closed trigger that advances the sequence
+
+Only a completed operating cycle creates a pending closed trigger. Startup, manual initial closure, and fault recovery do not. It occupies one RAM slot. Repeated offers coalesce without extending its original expiry. The default maximum age is **30 seconds**, adjustable in the web page.
+
+If the trigger is pending and QLab is ready, firmware starts its mapped cue. It clears the slot only after QLab's successful reply. If the reply is lost, it reconnects and retries until acknowledged or ineligible. A sent cue may have already run even though no reply was received. **The mapped cue must be designed to tolerate duplicate starts**; this is at-least-once attempted delivery within the expiry window, not exactly-once execution or proof that the whole QLab cue completed.
+
+Do not map this event directly to a repeated relative `GO`/“advance again” action. Use a dedicated cue for the intended sequence step, with a QLab-side guard/latch that ignores subsequent starts for that step; rearm it deliberately at the beginning of the next operating cycle. Simply giving a cue a fixed number does not make it idempotent—QLab can retrigger or restart it. Verify the guard by deliberately dropping replies and observing repeated starts during commissioning.
+
+Reopening, loss of closed confirmation, reboot, expiry, or any accepted settings commit cancels the pending closed trigger. Reconnection alone does not generate a new closed event. A late reply cannot acknowledge a newer pending-slot generation. The controller also suppresses another send while its motor-task snapshot is still clearing an acknowledged slot.
+
+All other events are live-only. Their bounded delivery buffer can absorb brief reply delays while QLab remains connected, but events older than one second or events during a disconnect are discarded. They are never replayed after reconnection and are not retried after uncertain delivery.
+
+References: [QLab OSC dictionary, transport and replies](https://reference.qlab.app/docs/v5/scripting/osc-dictionary-v5/), [QLab Network cues](https://qlab.app/docs/v5/networking/network-cues/).
