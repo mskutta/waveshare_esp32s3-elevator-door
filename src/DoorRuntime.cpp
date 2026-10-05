@@ -1,6 +1,7 @@
 #include "DoorRuntime.h"
 #include "Pins.h"
 #include "Encoder.h"
+#include "Mcp23008.h"
 #include <DoorMachine.h>
 #include <ClosedTrigger.h>
 #include <Wire.h>
@@ -39,12 +40,11 @@ bool exchange(Request &r) {
 }
 void control(void *) {
   pinMode(Pins::limit,INPUT_PULLUP);pinMode(Pins::beam,INPUT_PULLUP);
-  pinMode(Pins::upButton,INPUT_PULLUP);pinMode(Pins::downButton,INPUT_PULLUP);
-  digitalWrite(Pins::outputUp,kRear?HIGH:LOW);digitalWrite(Pins::outputDown,kRear?HIGH:LOW);
-  pinMode(Pins::outputUp,OUTPUT);pinMode(Pins::outputDown,OUTPUT);
   Wire.begin(Pins::sda,Pins::scl,100000); Wire.setTimeOut(10);
   TicI2C tic; tic.setProduct(TicProduct::T500);
   tic.deenergize(); bool initialHealthy=tic.getLastError()==0;
+  Mcp23008 mcp(Wire,kRear);bool mcpHealthy=mcp.begin();
+  bool upButton=false,downButton=false;uint32_t mcpAt=millis();
   bool encoderOK=encoderBegin();
   SSD1306AsciiWire oled;
   Wire.beginTransmission(0x3C); bool displayOK=Wire.endTransmission()==0;
@@ -57,6 +57,7 @@ void control(void *) {
   uint8_t displayRow=0;bool reservedChanging=false;
   if(!initialHealthy) machine.fault("Tic communication");
   if(!encoderOK) machine.fault("Encoder initialization");
+  if(!mcpHealthy) machine.fault("MCP23008 communication");
 
   auto motor = [&](MotorAction action, int32_t position) {
     bool ok=true;
@@ -86,6 +87,13 @@ void control(void *) {
 
   while(true) {
     uint32_t now=millis();
+    // Poll at 20 Hz; failed devices get bounded retries at 1 Hz. Recovery
+    // reinitializes outputs off but still requires an operator fault reset.
+    if(elapsed(now,mcpAt)>=(mcpHealthy?50u:1000u)) {
+      mcpAt=now;
+      if(!mcpHealthy) mcpHealthy=mcp.begin();
+      if(mcpHealthy) mcpHealthy=mcp.readButtons(upButton,downButton);
+    }
     int64_t counts=encoderOK?encoderCount():0;
     int64_t scaled=encoderToSteps(counts);
     bool scaleOK=scaled>=INT32_MIN && scaled<=INT32_MAX;
@@ -94,7 +102,7 @@ void control(void *) {
     input.motorPosition=tic.getCurrentPosition(); input.ticHealthy=tic.getLastError()==0;
     if(input.ticHealthy) {input.targetPosition=tic.getTargetPosition();input.ticHealthy=tic.getLastError()==0;}
     if(input.ticHealthy) {input.energized=tic.getEnergized();input.ticHealthy=tic.getLastError()==0;}
-    if(input.ticHealthy && machine.state()!=DoorState::Fault && elapsed(now,watchdogAt)>=100) {
+    if(input.ticHealthy && mcpHealthy && machine.state()!=DoorState::Fault && elapsed(now,watchdogAt)>=100) {
       tic.resetCommandTimeout();input.ticHealthy=tic.getLastError()==0;watchdogAt=now;
     }
     uint32_t commands;bool gotAck, liveReady;uint32_t generation;
@@ -108,16 +116,17 @@ void control(void *) {
     if(xQueueReceive(requests,&r,0)==pdTRUE) {
       bool ok=true;
       if(r.type==RequestType::Reserve) {
-        ok=!reserved && machine.canMaintain(input) && (!r.changingMotion || machine.canTune(input));
+        ok=!reserved && machine.canMaintain(input) && (!r.changingMotion || (mcpHealthy && machine.canTune(input)));
         if(ok) {reserved=true;reservedAt=now;reservedChanging=r.changingMotion;}
       } else if(r.type==RequestType::Commit) {
-        ok=reserved && machine.canMaintain(input) && (!reservedChanging || machine.canTune(input));
+        ok=reserved && machine.canMaintain(input) && (!reservedChanging || (mcpHealthy && machine.canTune(input)));
         if(ok) {motion=r.motion;machine.tune(motion);expiry=r.expiry;closed.cancel();reserved=false;}
       } else reserved=false;
       Reply reply{r.id,ok};xQueueSend(replies,&reply,0);
     }
     DoorOutput output;
-    if(!encoderOK || !scaleOK) output=machine.fault(!encoderOK?"Encoder initialization":"Encoder range");
+    if(!mcpHealthy) output=machine.state()==DoorState::Fault?DoorOutput{}:machine.fault("MCP23008 communication");
+    else if(!encoderOK || !scaleOK) output=machine.fault(!encoderOK?"Encoder initialization":"Encoder range");
     else output=machine.tick(input,commandsAllowed && !reserved && (commands&1),commandsAllowed && !reserved && (commands&2));
     if(!motor(output.motor,input.encoderPosition)) output=machine.fault(
 #ifdef MOTOR_INHIBITED
@@ -126,7 +135,23 @@ void control(void *) {
       "Tic communication"
 #endif
     );
+    // Set driver levels before publishing events; a failed output write must
+    // become a fault rather than publishing a successful closed cycle.
+    if(output.changed) {
+      if(!kRear) {
+        if(machine.state()==DoorState::Closed) {up=true;down=false;}
+        else if(machine.state()==DoorState::Open || machine.state()==DoorState::Fault) up=down=false;
+      } else {
+        if(machine.state()==DoorState::Open) up=down=true;
+        if(machine.state()==DoorState::Waiting || machine.state()==DoorState::Fault) up=down=false;
+      }
+    }
+    if(mcpHealthy && !mcp.outputs(up,down)) {
+      mcpHealthy=false;mcpAt=now;output=machine.fault("MCP23008 communication");
+    }
     if(machine.state()==DoorState::Fault) {
+      up=down=false;
+      if(mcpHealthy && !mcp.outputs(false,false)) {mcpHealthy=false;mcpAt=now;}
       // Never feed the Tic command watchdog in a fault. Even when release
       // cannot be transmitted, its configured hardware timeout can stop it.
       tic.deenergize(); closed.cancel();
@@ -135,20 +160,14 @@ void control(void *) {
     if(output.closedCycle) {++cycles;closed.offer(now);}
     closed.eligible(now,expiry,machine.state()==DoorState::Closed && machine.homed() && input.limit);
     if(output.changed) {
-      if(!kRear) {
-        if(machine.state()==DoorState::Closed) {up=true;down=false;}
-        else if(machine.state()==DoorState::Open || machine.state()==DoorState::Fault) {up=down=false;}
-      } else {
-        if(machine.state()==DoorState::Open) up=down=true;
-        if(machine.state()==DoorState::Waiting || machine.state()==DoorState::Fault) up=down=false;
-      }
       DoorEvent e{static_cast<uint8_t>(machine.state()),now};
       // Closed uses its dedicated slot, never this lossy live-event queue.
       if(machine.state()!=DoorState::Closed && (!liveReady || xQueueSend(events,&e,0)!=pdTRUE)) ++losses;
     }
     if(output.forced) {DoorEvent e{static_cast<uint8_t>(kForcedEvent),now};if(!liveReady || xQueueSend(events,&e,0)!=pdTRUE)++losses;}
-    digitalWrite(Pins::outputUp,kRear?!up:up);digitalWrite(Pins::outputDown,kRear?!down:down);
+    if(!mcpHealthy) upButton=downButton=false;
     DoorStatus s{};s.state=machine.state();s.homed=machine.homed();s.limit=input.limit;s.beam=input.beam;
+    s.mcpHealthy=mcpHealthy;s.upButton=upButton;s.downButton=downButton;
     s.energized=input.energized;s.healthy=input.ticHealthy;s.maintenance=reserved;s.upOutput=up;s.downOutput=down;
     s.encoderPosition=input.encoderPosition;s.encoderCounts=counts;s.motorPosition=input.motorPosition;s.targetPosition=input.targetPosition;
     s.pendingClosed=closed.pending();s.pendingAgeMs=closed.age(now);s.pendingGeneration=closed.generation();s.cycles=cycles;s.lostLiveEvents=losses;

@@ -3,6 +3,7 @@
 #include <OscCodec.h>
 #include <QLabSession.h>
 #include <HttpRequest.h>
+#include "Mcp23008.h"
 #include "Config.h"
 #include "OscTcp.h"
 #include "DoorRuntime.h"
@@ -25,7 +26,7 @@ static bool ethOnline=true;
 static uint32_t opens=0,acknowledged=0;
 static std::deque<DoorEvent> live;
 static bool reserveAllowed=true,commitAllowed=true,reserved=false;
-static unsigned resetRequests=0,networkChanges=0;
+static unsigned resetRequests=0;
 DoorStatus doorStatus(){return fakeDoor;}
 void doorOpenRequest(){++opens;}
 void doorAcknowledgeClosed(uint32_t g){acknowledged=g;}
@@ -34,7 +35,6 @@ void doorNetworkStatus(bool,bool,IPAddress){}
 bool ethernetReady(){return ethOnline;}
 IPAddress ethernetIP(){return IPAddress(0x0100007f);}
 const char *ethernetError(){return "";}
-bool ethernetConfigure(const NetworkConfig &){++networkChanges;return true;}
 void doorResetFault(){++resetRequests;}
 bool doorReserve(bool changing){reserved=reserveAllowed&&(!changing||fakeDoor.state==DoorState::Closed);return reserved;}
 bool doorCommit(const MotionConfig &,uint32_t){if(!commitAllowed)return false;reserved=false;return true;}
@@ -45,6 +45,7 @@ static void stateTests() {
   for(bool rear:{false,true}) {
     auto c=defaultConfig(rear);const char *error;assert(validateConfig(c,error));
     assert(c.motion.dwellMs==(rear?5000:600000));assert(c.motion.openSpeed==(rear?20000000:90000000));
+    assert(c.motion.openAccel==300000);
     DoorMachine door(c.motion,rear);auto i=input(0xfffffff0);
     assert(door.tick(i,true).motor==MotorAction::None);assert(!door.homed());
     i.limit=true;auto o=door.tick(i);assert(o.zeroEncoder && !o.closedCycle);assert(door.canTune(i));
@@ -104,20 +105,34 @@ static void configTests() {
   assert(sameMotion(decoded.motion,c.motion));assert(!configLoad(decoded,true));assert(decoded.motion.dwellMs==5000);
   Preferences::failWrite=true;assert(!configSave(c));Preferences::failWrite=false;
   Preferences::storage["door-front"]["config"]="{invalid";assert(!configLoad(decoded,false));assert(decoded.motion.travel==18600);
-  doc["version"]=2;assert(!configFromJson(doc.as<JsonVariantConst>(),decoded,error));doc["version"]=1;
+  doc["version"]=99;assert(!configFromJson(doc.as<JsonVariantConst>(),decoded,error));doc["version"]=kConfigVersion;
   doc["motion"]["openSpeed"]=-1;assert(!configFromJson(doc.as<JsonVariantConst>(),decoded,error));configToJson(c,doc);
   doc["motion"]["closeCurrent"]=70000;assert(!configFromJson(doc.as<JsonVariantConst>(),decoded,error));configToJson(c,doc);
   doc["motion"]["travel"]=2.5;assert(!configFromJson(doc.as<JsonVariantConst>(),decoded,error));configToJson(c,doc);
   doc["qlab"]["passcode"]=String(100,'x');assert(!configFromJson(doc.as<JsonVariantConst>(),decoded,error));
   c.motion.openTimeoutMs=100;assert(!validateConfig(c,why));c=defaultConfig(false);
   c.motion.closeCurrent=3094;assert(!validateConfig(c,why));c=defaultConfig(false);
-  c.network.dhcp=false;assert(validateConfig(c,why));strcpy(c.network.mask,"255.0.255.0");assert(!validateConfig(c,why));
-  c=defaultConfig(false);c.network.dhcp=false;strcpy(c.network.ip,"192.168.1.255");assert(!validateConfig(c,why));
-  uint32_t ip;for(auto text:{"1.2.3","256.1.1.1","1.2.3.4junk","1.2.3.-1",".1.2.3"})assert(!parseIPv4(text,ip));
-  assert(parseIPv4("192.168.1.10",ip)&&ip==0xc0a8010a);
-  c=defaultConfig(false);c.qlab.enabled=true;strcpy(c.qlab.host,"127.0.0.1");assert(!validateConfig(c,why));
+  // Old static or dynamic settings must not prevent loading motion/QLab data.
+  for(bool rear:{false,true}) for(bool oldDhcp:{false,true}) {
+    auto old=defaultConfig(rear);old.motion.travel=19000;old.qlab.enabled=true;
+    strcpy(old.qlab.host,"192.168.1.10");strcpy(old.qlab.workspace,"saved-workspace");
+    strcpy(old.qlab.passcode,"saved-passcode");old.qlab.events[3].enabled=true;strcpy(old.qlab.events[3].cue,"42");
+    configToJson(old,doc);assert(doc["network"].isUnbound());doc["version"]=1;
+    doc["network"]["dhcp"]=oldDhcp;doc["network"]["ip"]="192.168.1.50";
+    doc["network"]["mask"]="255.255.255.0";doc["network"]["gateway"]="192.168.1.1";doc["network"]["dns"]="192.168.1.1";
+    String stored;serializeJson(doc,stored);Preferences::storage[rear?"door-rear":"door-front"]["config"]=stored;
+    assert(configLoad(decoded,rear)&&sameMotion(decoded.motion,old.motion));
+    assert(decoded.qlab.enabled&&!strcmp(decoded.qlab.passcode,"saved-passcode")&&
+      !strcmp(decoded.qlab.workspace,"saved-workspace")&&decoded.qlab.events[3].enabled&&!strcmp(decoded.qlab.events[3].cue,"42"));
+    configToJson(decoded,doc);assert(doc["version"]==kConfigVersion&&doc["network"].isUnbound());
+    // API only accepts the current schema, without network override fields.
+    doc["network"]["dhcp"]=false;assert(!configFromJson(doc.as<JsonVariantConst>(),decoded,error));
+    assert(error.find("DHCP-only")!=String::npos);doc.remove("network");doc["version"]=1;
+    assert(!configFromJson(doc.as<JsonVariantConst>(),decoded,error));
+  }
+  c=defaultConfig(false);c.qlab.enabled=true;strcpy(c.qlab.host,"127.0.0.1");assert(!validateConfig(c,why));assert(std::string(why).find("workspace ID is required")!=std::string::npos);
   strcpy(c.qlab.workspace,"abc-123");assert(validateConfig(c,why));c.qlab.events[3].enabled=true;strcpy(c.qlab.events[3].cue,"../go");assert(!validateConfig(c,why));
-  std::cout<<"PASS JSON round trip, persistence, corruption/version recovery, validation\n";
+  std::cout<<"PASS JSON persistence, legacy DHCP/static migration retaining both door settings, static override rejection, validation\n";
 }
 static void codecTests() {
   uint8_t osc[256],framed[512];size_t n=encodeOsc(osc,sizeof(osc),"/elev-door-front/door/open");assert(n);
@@ -143,6 +158,13 @@ static void triggerTests() {
   QLabConfig q{};strcpy(q.workspace,"abc");QLabSession s;s.connected(q,0);
   s.reply("/workspace/wrong/connect","wrong","ok","ok",false,1);assert(s.stage()==QLabStage::Authenticate);
   s.reply(s.method(),"abc","ok","badpass",false,1);assert(s.stage()==QLabStage::Failed);
+  for(const char *reply:{"ok:view|edit|control","ok:control","ok:control|view","ok:edit|control"}) {
+    s.connected(q,0);s.reply(s.method(),"abc","ok",reply,false,1);assert(s.stage()==QLabStage::EnableReplies);
+  }
+  for(const char *reply:{"ok:view|edit","ok:","ok:controlExtra","ok:control|","ok:control||view","ok:unknown|control","badpass"}) {
+    s.connected(q,0);s.reply(s.method(),"abc","ok",reply,false,1);assert(s.stage()==QLabStage::Failed);
+  }
+  s.connected(q,0);s.reply(s.method(),"abc","denied","ok:control",false,1);assert(s.stage()==QLabStage::Failed);
   s.connected(q,0);s.reply(s.method(),"abc","ok","ok",false,1);assert(s.stage()==QLabStage::EnableReplies);
   s.reply("/alwaysReply","","ok",nullptr,false,2);assert(!s.ready());s.reply("/alwaysReply","","ok",nullptr,true,3);assert(s.ready());
   assert(s.startCue("closed",42,4));assert(!s.startCue("other",43,5));assert(s.reply(s.method(),"abc","ok",nullptr,false,6)==42);
@@ -174,7 +196,7 @@ static void tcpIntegration() {
   assert(bind(server,reinterpret_cast<sockaddr*>(&a),sizeof(a))==0 && listen(server,4)==0);socklen_t len=sizeof(a);assert(getsockname(server,reinterpret_cast<sockaddr*>(&a),&len)==0);
   fcntl(server,F_SETFL,O_NONBLOCK);QLabConfig cfg{};cfg.enabled=true;strcpy(cfg.host,"127.0.0.1");strcpy(cfg.workspace,"workspace-123");strcpy(cfg.passcode,"secret");cfg.port=ntohs(a.sin_port);cfg.closedExpiryMs=30000;
   cfg.events[3].enabled=true;strcpy(cfg.events[3].cue,"closed");cfg.events[9].enabled=true;strcpy(cfg.events[9].cue,"waiting");
-  testMillis=0;oscBegin();oscConfigure(cfg);int peer=-1;SlipDecoder decoder;unsigned closedStarts=0,liveStarts=0,auth=0;bool suppressAck=false,badpass=false;
+  testMillis=0;oscBegin();oscConfigure(cfg);int peer=-1;SlipDecoder decoder;unsigned closedStarts=0,liveStarts=0,auth=0,boolReplies=0,intReplies=0;bool suppressAck=false,badpass=false;
   auto pump=[&] {
     testMillis+=5;oscLoop();
     if(peer<0){peer=accept(server,nullptr,nullptr);if(peer>=0){fcntl(peer,F_SETFL,O_NONBLOCK);decoder.reset();}}
@@ -183,8 +205,11 @@ static void tcpIntegration() {
         // /alwaysReply 1 is an int message; the following read query verifies it.
         OscView v;if(!decodeOsc(decoder.data(),length,v))continue;
         String method=v.address;JsonDocument reply;reply["address"]=method;reply["status"]="ok";
-        if(method.find("/connect")!=String::npos){++auth;assert(v.argument&&!strcmp(v.argument,"secret"));reply["workspace_id"]="workspace-123";reply["data"]=badpass?"badpass":"ok";}
-        else if(method=="/alwaysReply")reply["data"]=1;
+        if(method.find("/connect")!=String::npos){++auth;assert(v.argument&&!strcmp(v.argument,"secret"));reply["workspace_id"]="workspace-123";reply["data"]=badpass?"badpass":"ok:view|edit|control";}
+        else if(method=="/alwaysReply") {
+          if(auth%2) {reply["data"]=true;++boolReplies;}
+          else {reply["data"]=1;++intReplies;}
+        }
         else if(method.find("/cue/")!=String::npos){reply["workspace_id"]="workspace-123";if(method.find("/closed/")!=String::npos){++closedStarts;if(suppressAck)continue;}else ++liveStarts;}
         String json;serializeJson(reply,json);auto bytes=frame(("/reply"+method).c_str(),json.c_str());
         // Deliberately fragment replies over successive sends.
@@ -195,7 +220,8 @@ static void tcpIntegration() {
   };
   auto until=[&](auto condition,int limit=2000){for(int i=0;i<limit&&!condition();++i)pump();assert(condition());};
   until([]{return oscStatus().ready;});assert(auth==1);
-  int command=connectLocal(53000);auto open=frame("/elev-door-front/door/open");
+  assert(oscTestListenPort()!=0);
+  int command=connectLocal(oscTestListenPort());auto open=frame("/elev-door-front/door/open");
   assert(send(command,open.data(),4,0)==4);pump();assert(opens==0);assert(send(command,open.data()+4,open.size()-4,0)==static_cast<ssize_t>(open.size()-4));
   until([]{return opens==1;});sendAll(command,frame("/elev-door-rear/door/open"));sendAll(command,frame("/elev-door-front/door/open","invalid"));for(int i=0;i<20;++i)pump();assert(opens==1);
   fakeDoor.pendingClosed=true;fakeDoor.pendingGeneration=1;
@@ -209,6 +235,7 @@ static void tcpIntegration() {
   suppressAck=true;fakeDoor.pendingClosed=true;fakeDoor.pendingGeneration=4;unsigned previous=closedStarts;
   until([&]{return closedStarts>previous;});fakeDoor.pendingClosed=false;for(int i=0;i<100;++i)pump();assert(closedStarts==previous+1);
   badpass=true;oscConfigure(cfg);for(int i=0;i<200;++i)pump();assert(!oscStatus().ready);assert(std::string(oscStatus().error).find("badpass")!=std::string::npos);
+  assert(boolReplies>0&&intReplies>0);
   ethOnline=false;pump();close(command);if(peer>=0)close(peer);close(server);
   std::cout<<"PASS real localhost TCP command server and QLab mock: SLIP, handshake, ACK, retry, outage, cancellation, badpass\n";
 }
@@ -224,9 +251,15 @@ static void webIntegration() {
     assert(done);close(fd);return response;
   };
   auto response=transact("GET","/");assert(response.find("200 OK")!=String::npos&&response.find("Motion tuning")!=String::npos);
+  assert(response.find("Open door (test)")!=String::npos);
+  assert(response.find("Automatic IP address (DHCP)")!=String::npos&&response.find("Static IP address")==String::npos&&response.find("id=\"dhcp\"")==String::npos);
   response=transact("GET","/api/config");assert(response.find("200 OK")!=String::npos);
   JsonDocument doc;assert(!deserializeJson(doc,response.substr(response.find("\r\n\r\n")+4)));
   response=transact("GET","/api/state");assert(response.find("elev-door-front")!=String::npos);
+  unsigned beforeOpen=opens;
+  assert(transact("GET","/api/door/open").find("404 Not Found")!=String::npos&&opens==beforeOpen);
+  response=transact("POST","/api/door/open");
+  assert(response.find("202 Accepted")!=String::npos&&response.find("\"requested\":true")!=String::npos&&opens==beforeOpen+1);
   assert(transact("POST","/api/fault/reset").find("202 Accepted")!=String::npos&&resetRequests==1);
   String json;doc["motion"]["travel"]=19000;serializeJson(doc,json);fakeDoor.state=DoorState::Opening;
   assert(transact("PUT","/api/config",json).find("409 Conflict")!=String::npos&&config.motion.travel==18600);
@@ -236,9 +269,41 @@ static void webIntegration() {
   assert(transact("PUT","/api/config",json).find("200 OK")!=String::npos&&config.motion.travel==19000);
   assert(transact("PUT","/api/config","{bad").find("400 Bad Request")!=String::npos);
   assert(transact("PUT","/api/config",String(8193,'x')).find("413 Content Too Large")!=String::npos);
-  auto next=config;next.network.dhcp=false;String error;assert(saveConfiguration(next,error));webLoop();assert(networkChanges==1);
-  next.network.dhcp=true;assert(saveConfiguration(next,error));webLoop();assert(config.network.dhcp&&config.motion.travel==19000&&networkChanges==2);
+  configToJson(config,doc);assert(doc["network"].isUnbound());
+  doc["network"]["dhcp"]=false;doc["network"]["ip"]="192.168.1.50";json="";serializeJson(doc,json);
+  response=transact("PUT","/api/config",json);
+  assert(response.find("400 Bad Request")!=String::npos&&response.find("DHCP-only")!=String::npos&&config.motion.travel==19000);
+  auto unchanged=Preferences::storage["door-front"]["config"];
+  doc.remove("network");doc["version"]=1;json="";serializeJson(doc,json);
+  assert(transact("PUT","/api/config",json).find("400 Bad Request")!=String::npos);
+  assert(Preferences::storage["door-front"]["config"]==unchanged);
   ethOnline=false;webLoop();
-  std::cout<<"PASS real localhost HTTP page/API, settings guards, persistence rollback, invalid/oversized bodies, DHCP recovery\n";
+  std::cout<<"PASS real localhost HTTP page/API, settings guards, persistence rollback, invalid/oversized bodies, static-IP override rejection\n";
 }
-int main(){stateTests();configTests();codecTests();triggerTests();httpParserTests();tcpIntegration();webIntegration();std::cout<<"All native tests passed.\n";}
+static void mcpTests() {
+  for(bool rear:{false,true}) {
+    TwoWire bus;Mcp23008 mcp(bus,rear);assert(mcp.begin());
+    assert(bus.writes.front()==std::make_pair(uint8_t(0),uint8_t(0xff)));
+    assert(bus.writes[3]==std::make_pair(uint8_t(6),uint8_t(rear?0:0x50)));
+    assert(bus.writes[4]==std::make_pair(uint8_t(10),uint8_t(rear?0xc0:0)));
+    assert(bus.writes.back()==std::make_pair(uint8_t(0),uint8_t(rear?0x3f:0x5f)));
+    auto size=bus.writes.size();assert(mcp.outputs(false,false)&&bus.writes.size()==size);
+    assert(mcp.outputs(true,false)&&bus.writes.back().second==0x80);
+    assert(mcp.outputs(false,true)&&bus.writes.back().second==(rear?0x40:0x20));
+    assert(mcp.outputs(true,true)&&bus.writes.back().second==(rear?0:0xa0));
+    bool up,down;bus.input=0xaf;assert(mcp.readButtons(up,down));assert(up==!rear&&down==!rear);
+    bus.input=0xbf;assert(mcp.readButtons(up,down)&&up==!rear&&!down);
+    bus.input=0xef;assert(mcp.readButtons(up,down)&&!up&&down==!rear);
+    bus.input=0xff;assert(mcp.readButtons(up,down)&&!up&&!down);
+    bus.shortRead=true;assert(!mcp.readButtons(up,down)&&!up&&!down);assert(!mcp.outputs(false,false));
+    bus.shortRead=false;assert(mcp.begin()&&mcp.outputs(false,false));
+    bus.failAt=bus.transactions;assert(!mcp.outputs(true,true));assert(!mcp.outputs(false,false));
+    bus.failAt=-1;assert(mcp.begin());bus.failAt=bus.transactions;assert(!mcp.readButtons(up,down));
+    for(int failure=0;failure<6;++failure) {
+      TwoWire broken;broken.failAt=failure;Mcp23008 failed(broken,rear);
+      assert(!failed.begin()&&!failed.outputs(true,true));
+    }
+  }
+  std::cout<<"PASS MCP23008 safe startup, both door mappings/polarities, button inputs, NACK/short-read failure and recovery\n";
+}
+int main(){mcpTests();stateTests();configTests();codecTests();triggerTests();httpParserTests();tcpIntegration();webIntegration();std::cout<<"All native tests passed.\n";}

@@ -6,3 +6,6 @@ void oscBegin();
 void oscConfigure(const QLabConfig &);
 void oscLoop();
 OscStatus oscStatus();
+#ifdef ELEVATOR_NATIVE_TEST
+uint16_t oscTestListenPort();
+#endif

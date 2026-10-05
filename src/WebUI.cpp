@@ -13,7 +13,6 @@
 namespace {
 int listener=-1,client=-1;
 AppConfig *config=nullptr;
-bool applyNetwork=false;
 HttpRequest request;
 String responseBody;
 const char *body=nullptr;
@@ -33,6 +32,7 @@ void state() {
   auto s=doorStatus();auto o=oscStatus();JsonDocument doc;
   doc["door"]=kDoorName;doc["state"]=eventName(static_cast<size_t>(s.state));
   doc["homed"]=s.homed;doc["limit"]=s.limit;doc["beam"]=s.beam;doc["energized"]=s.energized;
+  doc["mcpHealthy"]=s.mcpHealthy;doc["upButtonPressed"]=s.upButton;doc["downButtonPressed"]=s.downButton;
   doc["ticHealthy"]=s.healthy;doc["maintenance"]=s.maintenance;doc["upOutputActive"]=s.upOutput;doc["downOutputActive"]=s.downOutput;
   doc["encoderCounts"]=s.encoderCounts;doc["encoderPosition"]=s.encoderPosition;doc["motorPosition"]=s.motorPosition;doc["targetPosition"]=s.targetPosition;
   doc["fault"]=s.fault;doc["pendingClosed"]=s.pendingClosed;doc["pendingAgeMs"]=s.pendingAgeMs;
@@ -53,6 +53,7 @@ void dispatch() {
   if(!strcmp(method,"GET")&&!strcmp(path,"/"))respond(200,"text/html; charset=utf-8",kWebPage);
   else if(!strcmp(method,"GET")&&!strcmp(path,"/api/state"))state();
   else if(!strcmp(method,"GET")&&!strcmp(path,"/api/config")){JsonDocument doc;configToJson(*config,doc);jsonReply(200,doc);}
+  else if(!strcmp(method,"POST")&&!strcmp(path,"/api/door/open")){doorOpenRequest();respond(202,"application/json","{\"requested\":true}");}
   else if(!strcmp(method,"POST")&&!strcmp(path,"/api/fault/reset")){doorResetFault();respond(202,"application/json","{\"requested\":true}");}
   else if(!strcmp(method,"PUT")&&!strcmp(path,"/api/config")) {
     JsonDocument doc;String error;
@@ -81,19 +82,12 @@ bool saveConfiguration(const AppConfig &next,String &error) {
     error=restored?"Controller did not accept settings; previous settings restored":"Controller did not accept settings; storage rollback failed. Inspect saved settings before rebooting";
     return false;
   }
-  applyNetwork=memcmp(&next.network,&config->network,sizeof(NetworkConfig))!=0;
   *config=next;oscConfigure(config->qlab);error="";return true;
 }
 void webBegin(AppConfig &c){config=&c;}
 void webLoop() {
-  auto applySavedNetwork=[] {
-    if(applyNetwork&&client<0){applyNetwork=false;oscConfigure(config->qlab);
-      if(!ethernetConfigure(config->network))Serial.printf("Ethernet configuration failed: %s; USB network-reset restores DHCP\n",ethernetError());
-    }
-  };
   if(!ethernetReady()) {
     closeClient();if(listener>=0){close(listener);listener=-1;}
-    applySavedNetwork();
     if(!ethernetReady())return;
   }
   if(listener<0)listenHTTP();
@@ -121,6 +115,4 @@ void webLoop() {
       if(client>=0&&headerOffset==headerLength&&bodyOffset==bodyLength)closeClient();
     }
   }
-  // Drain the save response before changing the controller address.
-  applySavedNetwork();
 }

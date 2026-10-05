@@ -3,13 +3,12 @@
 #include <MotionFields.h>
 
 void configToJson(const AppConfig &c, JsonDocument &doc) {
+  doc.clear();
   doc["version"]=kConfigVersion;
   auto m=doc["motion"].to<JsonObject>();
 #define WRITE(name) m[#name]=c.motion.name;
   MOTION_FIELDS(WRITE)
 #undef WRITE
-  auto n=doc["network"].to<JsonObject>(); n["dhcp"]=c.network.dhcp;
-  n["ip"]=c.network.ip; n["mask"]=c.network.mask; n["gateway"]=c.network.gateway; n["dns"]=c.network.dns;
   auto q=doc["qlab"].to<JsonObject>(); q["enabled"]=c.qlab.enabled; q["host"]=c.qlab.host;
   q["port"]=c.qlab.port; q["workspace"]=c.qlab.workspace; q["passcode"]=c.qlab.passcode;
   q["closedExpiryMs"]=c.qlab.closedExpiryMs;
@@ -29,13 +28,13 @@ bool configFromJson(JsonVariantConst doc, AppConfig &out, String &error) {
   AppConfig c{};
   error="Missing field, incorrect type, unsupported version, or oversized string";
   if(!doc["version"].is<uint32_t>() || doc["version"].as<uint32_t>()!=kConfigVersion) return false;
+  if(!doc["network"].isUnbound()) {
+    error="Ethernet is DHCP-only; remove network settings and reload the current configuration";return false;
+  }
   auto m=doc["motion"];
 #define READ(name) if(!m[#name].is<decltype(c.motion.name)>()) return false; c.motion.name=m[#name].as<decltype(c.motion.name)>();
   MOTION_FIELDS(READ)
 #undef READ
-  auto n=doc["network"];
-  if(!readBool(n["dhcp"],c.network.dhcp) || !text(n["ip"],c.network.ip) || !text(n["mask"],c.network.mask) ||
-     !text(n["gateway"],c.network.gateway) || !text(n["dns"],c.network.dns)) return false;
   auto q=doc["qlab"];
   if(!readBool(q["enabled"],c.qlab.enabled) || !text(q["host"],c.qlab.host) || !text(q["workspace"],c.qlab.workspace) ||
      !text(q["passcode"],c.qlab.passcode) || !q["port"].is<uint16_t>() || !q["closedExpiryMs"].is<uint32_t>()) return false;
@@ -57,6 +56,11 @@ bool configLoad(AppConfig &c, bool rear) {
   String stored=p.getString("config"); p.end();
   JsonDocument doc; String error;
   if(deserializeJson(doc,stored)) return false;
+  // Version 1 had configurable static IP fields. Retire those fields only;
+  // retain validated motion settings, credentials, and cue mappings.
+  if(doc["version"].is<uint32_t>() && doc["version"].as<uint32_t>()==1) {
+    doc.remove("network");doc["version"]=kConfigVersion;
+  }
   return configFromJson(doc,c,error);
 }
 bool configSave(const AppConfig &c) {

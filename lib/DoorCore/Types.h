@@ -17,10 +17,6 @@ struct MotionConfig {
   uint32_t dwellMs, shortDwellMs, settleMs, openTimeoutMs, closeTimeoutMs, homingTimeoutMs;
   int32_t closeDrift, openDrift;
 };
-struct NetworkConfig {
-  bool dhcp;
-  char ip[16], mask[16], gateway[16], dns[16];
-};
 struct CueMapping { bool enabled; char cue[40]; };
 struct QLabConfig {
   bool enabled;
@@ -29,11 +25,10 @@ struct QLabConfig {
   uint32_t closedExpiryMs;
   CueMapping events[kEventCount];
 };
-struct AppConfig { MotionConfig motion; NetworkConfig network; QLabConfig qlab; };
+struct AppConfig { MotionConfig motion; QLabConfig qlab; };
 AppConfig defaultConfig(bool rear);
 bool validateConfig(const AppConfig &, const char *&error);
 bool sameMotion(const MotionConfig &, const MotionConfig &);
-bool parseIPv4(const char *, uint32_t &);
 inline int64_t encoderToSteps(int64_t counts) { return counts * 1600 / 600; }
 
 struct DoorInput {

@@ -2,7 +2,7 @@
 #include <Arduino.h>
 #include <ArduinoJson.h>
 #include <Types.h>
-constexpr uint32_t kConfigVersion = 1;
+constexpr uint32_t kConfigVersion = 2;
 void configToJson(const AppConfig &, JsonDocument &);
 bool configFromJson(JsonVariantConst, AppConfig &, String &error);
 bool configLoad(AppConfig &, bool rear);

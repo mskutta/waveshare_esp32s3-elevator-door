@@ -21,12 +21,11 @@ void serialLoop() {
       command[commandSize]=0;
       if(commandOverflow) Serial.println("Command too long");
       else if(!strcmp(command,"network-reset")) {
-        AppConfig next=config;next.network.dhcp=true;String error;
-        if(saveConfiguration(next,error)) Serial.println("DHCP restored; motion settings and cue mappings retained");
-        else Serial.println(error);
+        if(ethernetRenewDhcp()) Serial.println("DHCP renewal requested; settings unchanged");
+        else Serial.printf("DHCP renewal failed: %s\n",ethernetError());
       } else if(!strcmp(command,"status")) {
-        auto s=doorStatus();Serial.printf("%s state=%s encoder=%ld motor=%ld limit=%u beam=%u pending=%u fault=%s ip=%s\n",
-          kDoorName,eventName(static_cast<size_t>(s.state)),static_cast<long>(s.encoderPosition),static_cast<long>(s.motorPosition),s.limit,s.beam,s.pendingClosed,s.fault,ethernetIP().toString().c_str());
+        auto s=doorStatus();Serial.printf("%s state=%s encoder=%ld motor=%ld limit=%u beam=%u mcp=%u buttons=%u/%u pending=%u fault=%s ip=%s\n",
+          kDoorName,eventName(static_cast<size_t>(s.state)),static_cast<long>(s.encoderPosition),static_cast<long>(s.motorPosition),s.limit,s.beam,s.mcpHealthy,s.upButton,s.downButton,s.pendingClosed,s.fault,ethernetIP().toString().c_str());
       } else if(commandSize) Serial.println("Commands: status, network-reset");
       commandSize=0;commandOverflow=false;
     } else if(commandSize<sizeof(command)-1) command[commandSize++]=c;
@@ -44,7 +43,7 @@ void setup() {
   // getEfuseMac stores MAC bytes little-endian; use the device-specific final
   // three bytes, rather than the shared manufacturer prefix.
   char hostname[40];snprintf(hostname,sizeof(hostname),"%s-%06lX",kDoorName,static_cast<unsigned long>((ESP.getEfuseMac()>>24)&0xffffff));
-  if(!ethernetBegin(hostname,config.network)) Serial.printf("Ethernet startup failed: %s; door task continues\n",ethernetError());
+  if(!ethernetBegin(hostname)) Serial.printf("Ethernet startup failed: %s; door task continues\n",ethernetError());
   oscBegin();oscConfigure(config.qlab);webBegin(config);
   Serial.println("OSC TCP/SLIP :53000; web :80; USB commands: status, network-reset");
 }

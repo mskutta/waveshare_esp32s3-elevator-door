@@ -1,10 +1,10 @@
 #pragma once
 namespace Pins {
-constexpr int sda = 17, scl = 18;
-constexpr int encoderA = 15, encoderB = 16;
+// Physical header pins 10 (SDA) and 11 (SCL); no camera attached.
+constexpr int sda = 41, scl = 40;
+// Adjacent physical header pins 4 (A) and 5 (B).
+constexpr int encoderA = 48, encoderB = 47;
 constexpr int limit = 21, beam = 1;
-constexpr int upButton = 38, downButton = 39;
-constexpr int outputUp = 40, outputDown = 41;
 }
 #if defined(FRONT_DOOR) == defined(REAR_DOOR)
 #error Select exactly one door build

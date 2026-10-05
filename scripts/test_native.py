@@ -15,11 +15,11 @@ if not compiler:
 with tempfile.TemporaryDirectory(prefix='elevator-tests-') as temporary:
     binary = Path(temporary) / 'tests'
     command = [compiler, '-std=c++17', '-Wall', '-Wextra', '-Werror', '-g',
-               '-fsanitize=address,undefined', '-DFRONT_DOOR']
+               '-fsanitize=address,undefined', '-DFRONT_DOOR', '-DELEVATOR_NATIVE_TEST']
     for include in ['tests/stubs', 'include', 'lib/DoorCore', str(json_include)]:
         command.extend(['-I', str(root / include)])
     command.extend(str(p) for p in sorted((root / 'lib/DoorCore').glob('*.cpp')))
-    command.extend(str(root / p) for p in ['src/Config.cpp', 'src/OscTcp.cpp', 'src/WebUI.cpp', 'tests/test_main.cpp'])
+    command.extend(str(root / p) for p in ['src/Mcp23008.cpp', 'src/Config.cpp', 'src/OscTcp.cpp', 'src/WebUI.cpp', 'tests/test_main.cpp'])
     command.extend(['-o', str(binary)])
     subprocess.run(command, check=True, cwd=root)
     subprocess.run([str(binary)], check=True, cwd=root)

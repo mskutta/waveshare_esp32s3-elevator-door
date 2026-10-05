@@ -10,7 +10,6 @@
 #include <esp_mac.h>
 #include <esp_netif.h>
 #include <esp_netif_defaults.h>
-#include <lwip/ip4_addr.h>
 extern void add_esp_interface_netif(esp_interface_t, esp_netif_t *);
 namespace {
 std::atomic<bool> linked{false}, gotIP{false};
@@ -30,29 +29,17 @@ void event(void *, esp_event_base_t base, int32_t id, void *data) {
 }
 bool check(esp_err_t e,const char *why) { if(e!=ESP_OK) {failure=why;return false;} return true; }
 }
-bool ethernetConfigure(const NetworkConfig &c) {
+bool ethernetRenewDhcp() {
   if(!ethNetif) return false;
   gotIP=false; address=0;
   esp_err_t e=esp_netif_dhcpc_stop(ethNetif);
   if(e!=ESP_OK && e!=ESP_ERR_ESP_NETIF_DHCP_ALREADY_STOPPED) {failure="DHCP stop";return false;}
-  if(c.dhcp) {
-    esp_netif_ip_info_t empty{};
-    if(!check(esp_netif_set_ip_info(ethNetif,&empty),"Clear static IP")) return false;
-    if(!check(esp_netif_dhcpc_start(ethNetif),"DHCP start")) return false;
-  } else {
-    esp_netif_ip_info_t info{};
-    ip4addr_aton(c.ip,reinterpret_cast<ip4_addr_t *>(&info.ip));
-    ip4addr_aton(c.mask,reinterpret_cast<ip4_addr_t *>(&info.netmask));
-    ip4addr_aton(c.gateway,reinterpret_cast<ip4_addr_t *>(&info.gw));
-    if(!check(esp_netif_set_ip_info(ethNetif,&info),"Static IP")) return false;
-    esp_netif_dns_info_t dns{}; dns.ip.type=ESP_IPADDR_TYPE_V4;
-    ip4addr_aton(c.dns,reinterpret_cast<ip4_addr_t *>(&dns.ip.u_addr.ip4));
-    if(!check(esp_netif_set_dns_info(ethNetif,ESP_NETIF_DNS_MAIN,&dns),"DNS configuration")) return false;
-    address=info.ip.addr; gotIP=true;
-  }
+  esp_netif_ip_info_t empty{};
+  if(!check(esp_netif_set_ip_info(ethNetif,&empty),"Clear IP")) return false;
+  if(!check(esp_netif_dhcpc_start(ethNetif),"DHCP start")) return false;
   failure=""; return true;
 }
-bool ethernetBegin(const char *hostname,const NetworkConfig &c) {
+bool ethernetBegin(const char *hostname) {
   esp_err_t e=esp_netif_init();
   if(e!=ESP_OK && e!=ESP_ERR_INVALID_STATE) {failure="ethNetif init";return false;}
   e=esp_event_loop_create_default();
@@ -83,7 +70,7 @@ bool ethernetBegin(const char *hostname,const NetworkConfig &c) {
   if(!glue || !check(esp_netif_attach(ethNetif,glue),"Attach ethNetif")) return false;
   add_esp_interface_netif(ESP_IF_ETH,ethNetif);
   if(!check(esp_netif_set_hostname(ethNetif,hostname),"Hostname")) return false;
-  if(!ethernetConfigure(c)) return false;
+  if(!ethernetRenewDhcp()) return false;
   return check(esp_eth_start(driver),"Ethernet start");
 }
 bool ethernetReady() {return linked.load() && gotIP.load();}

@@ -2,6 +2,7 @@
 #include "Encoder.h"
 #include "Pins.h"
 #include <driver/pcnt.h>
+#include <driver/gpio.h>
 #include <soc/pcnt_struct.h>
 #include <esp_intr_alloc.h>
 
@@ -46,6 +47,10 @@ bool encoderBegin() {
      pcnt_event_enable(PCNT_UNIT_0,PCNT_EVT_L_LIM)!=ESP_OK ||
      pcnt_isr_register(counterISR,nullptr,ESP_INTR_FLAG_IRAM,nullptr)!=ESP_OK ||
      pcnt_intr_enable(PCNT_UNIT_0)!=ESP_OK) return false;
+  // Configure after PCNT setup so its GPIO initialization cannot override
+  // the intended bias. Open-collector A/B use the internal 3.3 V pull-ups.
+  if(gpio_set_pull_mode(static_cast<gpio_num_t>(Pins::encoderA),GPIO_PULLUP_ONLY)!=ESP_OK ||
+     gpio_set_pull_mode(static_cast<gpio_num_t>(Pins::encoderB),GPIO_PULLUP_ONLY)!=ESP_OK) return false;
   return pcnt_counter_resume(PCNT_UNIT_0)==ESP_OK;
 }
 int64_t encoderCount() { portENTER_CRITICAL(&mux); int64_t n=snapshot()-origin; portEXIT_CRITICAL(&mux); return n; }

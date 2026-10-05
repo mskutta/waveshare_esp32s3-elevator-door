@@ -1,6 +1,6 @@
 # QLab 5 setup
 
-Use direct Ethernet between controllers and the show-control network. Give each controller a DHCP reservation or configured static IP; keep QLab's wired interface on the same reachable network.
+Use direct Ethernet between controllers and the show-control network. Controllers use DHCP only. For stable QLab patch destinations, give each controller a DHCP reservation on the network; keep QLab's wired interface on the same reachable network.
 
 ## QLab → door
 
@@ -17,7 +17,9 @@ Send no arguments. Disable duration/resend behavior; repeated messages intention
 
 ## Door → QLab
 
-Configure the controller's QLab host, TCP OSC port (default **53000**), workspace unique ID, and optional OSC passcode. Configure the workspace's OSC Access permissions to allow control via the supplied passcode, or via passcode-less connections if no passcode is set. In particular, cue starts must be permitted. Use the workspace ID, not its title; `/workspaces` in QLab's OSC API can enumerate IDs.
+Configure the controller's QLab host, TCP OSC port (default **53000**), workspace unique ID, and optional OSC passcode. Configure the workspace's OSC Access permissions to allow control via the supplied passcode, or via passcode-less connections if no passcode is set. In particular, cue starts must be permitted. Copy the workspace unique ID from the **Info tab of QLab’s Workspace Status window**. It normally looks like `1B11984A-3EBC-4A9C-A004-B9E3AA32DA6B`; paste only the ID, with no braces or `/workspace/` prefix. `/workspaces` in QLab’s OSC API can also enumerate IDs. This firmware requires the unique ID; leaving it blank cannot enable outgoing cue triggers. QLab itself supports unscoped messages to all listening workspaces, but the controller deliberately targets one workspace.
+
+Check the master **Enable cue triggers** option, enable the **closed** event and enter the exact cue number (for example, `1`), then click **Save configuration**. The host is the QLab Mac’s address, not the controller’s. If saving fails, address the displayed validation error; checkbox changes are not applied until a successful save. **QLab: ready** must appear before testing a complete cycle. Offline with zero reconnect attempts usually means the master enable setting is off.
 
 Each enabled event maps to one cue number. Use a QLab Group cue for multiple actions. The firmware connects to `/workspace/<id>/connect`, enables `/alwaysReply 1`, then queries `/alwaysReply` and waits for confirmation before becoming ready. It sends cue starts as:
 
@@ -25,7 +27,7 @@ Each enabled event maps to one cue number. Use a QLab Group cue for multiple act
 /workspace/<id>/cue/<cue-number>/start
 ```
 
-Default JSON replies are required. The controller validates the reply envelope, invoked method, optional workspace ID, and successful status. Avoid changing `/replyFormat` for this connection. Invalid passcodes, denied permissions, and QLab errors appear in diagnostics; authentication errors back off for 30 seconds. Connection/reply timeouts reconnect after 2.5 seconds. TCP connect, transmit, and receive are nonblocking; hostname lookup can wait on the separate network core without stopping motor control.
+Default JSON replies are required. Reply-mode confirmation accepts QLab’s JSON boolean `true` as well as the legacy nonzero numeric form. The controller validates the reply envelope, invoked method, optional workspace ID, and successful status. Avoid changing `/replyFormat` for this connection. Authentication accepts legacy `ok` replies and QLab 5 permission-bearing replies such as `ok:view|edit|control`; permission-bearing replies must include `control` to become ready. Invalid passcodes, denied permissions, and QLab errors appear in diagnostics; authentication errors back off for 30 seconds. Connection/reply timeouts reconnect after 2.5 seconds. TCP connect, transmit, and receive are nonblocking; hostname lookup can wait on the separate network core without stopping motor control.
 
 Events offered for mapping: `unknown`, `homing`, `close` (settling before closing), `closed`, `closing`, `open` (settling before opening), `opening`, `reopen`, `reopening`, `waiting`, `fault`, and `forced`. States describe the preserved firmware transitions: **`open` is not an open-limit confirmation**. There is no open limit switch. Use `waiting` for the completion of opening, noting that it can also follow forced movement.
 

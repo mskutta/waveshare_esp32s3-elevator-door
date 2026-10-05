@@ -56,7 +56,8 @@ void receiveReply(const uint8_t *data,size_t n) {
   if(strcmp(view.address+6,method)) {++status.rejected;return;}
   QLabStage previous=session.stage();
   uint32_t generation=session.reply(method,json["workspace_id"]|"",json["status"],json["data"].is<const char*>()?json["data"].as<const char*>():nullptr,
-    json["data"].is<int>() && json["data"].as<int>()!=0,millis());
+    (json["data"].is<bool>() && json["data"].as<bool>()) ||
+    (json["data"].is<int>() && json["data"].as<int>()!=0),millis());
   if(session.stage()==QLabStage::Failed) {error("QLab denied/error/badpass");closeOutput(30000);return;}
   if(previous==QLabStage::Authenticate && session.stage()==QLabStage::EnableReplies) authenticated();
   if(session.ready()) status.error[0]=0;
@@ -70,7 +71,14 @@ void serveInput(uint32_t now) {
     listener=socket(AF_INET,SOCK_STREAM,0);
     if(listener<0) {error("OSC listener socket");return;}
     int yes=1;setsockopt(listener,SOL_SOCKET,SO_REUSEADDR,&yes,sizeof(yes));
-    sockaddr_in addr{};addr.sin_family=AF_INET;addr.sin_port=htons(53000);addr.sin_addr.s_addr=INADDR_ANY;
+    sockaddr_in addr{};addr.sin_family=AF_INET;
+#ifdef ELEVATOR_NATIVE_TEST
+    // Let the host assign a test port; QLab itself may be running on 53000.
+    addr.sin_port=0;
+#else
+    addr.sin_port=htons(53000);
+#endif
+    addr.sin_addr.s_addr=INADDR_ANY;
     if(!nonblocking(listener) || bind(listener,reinterpret_cast<sockaddr*>(&addr),sizeof(addr)) || listen(listener,2)) {
       error("OSC listen/bind");close(listener);listener=-1;return;
     }
@@ -125,6 +133,12 @@ void oscConfigure(const QLabConfig &c) {
   if(listener>=0) {close(listener);listener=-1;}
 }
 OscStatus oscStatus() {status.ready=session.operational();return status;}
+#ifdef ELEVATOR_NATIVE_TEST
+uint16_t oscTestListenPort() {
+  sockaddr_in address{};socklen_t size=sizeof(address);
+  return listener>=0 && getsockname(listener,reinterpret_cast<sockaddr*>(&address),&size)==0?ntohs(address.sin_port):0;
+}
+#endif
 void oscLoop() {
   uint32_t now=millis();DoorStatus door=doorStatus();
   if(!ethernetReady()) {
