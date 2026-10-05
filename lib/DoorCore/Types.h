@@ -5,7 +5,8 @@
 enum class DoorState : uint8_t { Unknown, Homing, Close, Closed, Closing, Open, Opening, Reopen, Reopening, Waiting, Fault };
 constexpr size_t kStateCount = 11;
 constexpr size_t kForcedEvent = kStateCount;
-constexpr size_t kEventCount = kStateCount + 1;
+constexpr size_t kBeamBreakEvent = kForcedEvent + 1;
+constexpr size_t kEventCount = kStateCount + 2;
 const char *eventName(size_t event);
 inline uint32_t elapsed(uint32_t now, uint32_t then) { return now - then; }
 

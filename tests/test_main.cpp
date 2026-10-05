@@ -1,5 +1,6 @@
 #include <DoorMachine.h>
 #include <ClosedTrigger.h>
+#include <BeamBreakTrigger.h>
 #include <OscCodec.h>
 #include <QLabSession.h>
 #include <HttpRequest.h>
@@ -41,6 +42,34 @@ bool doorCommit(const MotionConfig &,uint32_t){if(!commitAllowed)return false;re
 void doorReleaseReservation(){reserved=false;}
 
 static DoorInput input(uint32_t now=0){return {now,false,false,true,false,0,0,0};}
+static void beamBreakTests() {
+  for(bool rear:{false,true}) {
+    DoorMachine door(defaultConfig(rear).motion,rear);
+    BeamBreakTrigger trigger;
+    auto i=input();
+    auto tick=[&](bool reset=false) {
+      ++i.now;door.tick(i,false,reset);
+      return trigger.observe(i.beam,door.state(),door.homed());
+    };
+    i.beam=true;assert(!tick()); // startup blocked establishes baseline
+    assert(!tick());i.beam=false;assert(!tick());i.beam=true;assert(tick());
+    assert(!tick());i.beam=false;assert(!tick());i.beam=true;assert(tick());
+    i.beam=false;assert(!tick());i.ticHealthy=false;i.beam=true;
+    assert(!tick()&&door.state()==DoorState::Fault); // simultaneous break/fault
+    i.ticHealthy=true;assert(!tick(true)&&door.state()==DoorState::Unknown);
+    assert(!tick());i.beam=false;assert(!tick());i.beam=true;assert(tick());
+    i.beam=false;assert(!tick());i.limit=true;i.beam=true;
+    assert(!tick()&&door.homed()); // simultaneous break/initialization
+    i.limit=false;i.beam=false;assert(!tick()&&!door.homed());
+    i.beam=true;assert(!tick()); // latch survives position loss
+    door.fault("hardware");i.beam=false;assert(!tick());
+    assert(!tick(true));i.beam=true;assert(!tick()); // and fault reset
+    BeamBreakTrigger reboot;
+    assert(!reboot.observe(false,DoorState::Unknown,false));
+    assert(reboot.observe(true,DoorState::Unknown,false));
+  }
+  std::cout<<"PASS beam edges, startup baseline, faults/reset, initialization latch and reboot\n";
+}
 static void stateTests() {
   for(bool rear:{false,true}) {
     auto c=defaultConfig(rear);const char *error;assert(validateConfig(c,error));
@@ -206,6 +235,27 @@ static void configTests() {
   assert(configFromJson(doc.as<JsonVariantConst>(),decoded,error));assert(sameMotion(c.motion,decoded.motion));
   assert(!configLoad(decoded,false));assert(configSave(c));assert(configLoad(decoded,false));
   assert(sameMotion(decoded.motion,c.motion));assert(!configLoad(decoded,true));assert(decoded.motion.dwellMs==5000);
+  assert(kForcedEvent==11&&kBeamBreakEvent==12&&!strcmp(eventName(kBeamBreakEvent),"beam_break"));
+  assert(!c.qlab.events[kBeamBreakEvent].enabled&&!c.qlab.events[kBeamBreakEvent].cue[0]);
+  c.qlab.events[kBeamBreakEvent].enabled=true;strcpy(c.qlab.events[kBeamBreakEvent].cue,"beam.1");
+  configToJson(c,doc);assert(configFromJson(doc.as<JsonVariantConst>(),decoded,error));
+  assert(decoded.qlab.events[kBeamBreakEvent].enabled&&!strcmp(decoded.qlab.events[kBeamBreakEvent].cue,"beam.1"));
+  doc["qlab"]["events"].remove("beam_break");assert(!configFromJson(doc.as<JsonVariantConst>(),decoded,error));
+  configToJson(c,doc);doc["qlab"]["events"]["beam_break"]["cue"]="../go";
+  assert(!configFromJson(doc.as<JsonVariantConst>(),decoded,error));c=defaultConfig(false);
+  for(bool rear:{false,true}) for(uint32_t version:{1u,2u,3u}) {
+    auto old=defaultConfig(rear);old.motion.travel=19000;old.qlab.events[3].enabled=true;
+    strcpy(old.qlab.events[3].cue,"42");configToJson(old,doc);doc["version"]=version;
+    doc["qlab"]["events"].remove("beam_break");
+    if(version<3) for(const char *field:{"openRetryLimit","openRetryDivisor","openRetryPauseMs","openCompletionTolerance"})doc["motion"].remove(field);
+    else {doc["motion"]["openRetryLimit"]=1;doc["motion"]["openRetryPauseMs"]=1500;}
+    String stored;serializeJson(doc,stored);Preferences::storage[rear?"door-rear":"door-front"]["config"]=stored;
+    assert(configLoad(decoded,rear)&&decoded.motion.travel==19000);
+    assert(decoded.qlab.events[3].enabled&&!strcmp(decoded.qlab.events[3].cue,"42"));
+    assert(!decoded.qlab.events[kBeamBreakEvent].enabled&&!decoded.qlab.events[kBeamBreakEvent].cue[0]);
+    if(version==3)assert(decoded.motion.openRetryLimit==1&&decoded.motion.openRetryPauseMs==1500);
+    configToJson(decoded,doc);assert(doc["version"]==4);
+  }
   Preferences::failWrite=true;assert(!configSave(c));Preferences::failWrite=false;
   Preferences::storage["door-front"]["config"]="{invalid";assert(!configLoad(decoded,false));assert(decoded.motion.travel==18600);
   doc["version"]=99;assert(!configFromJson(doc.as<JsonVariantConst>(),decoded,error));doc["version"]=kConfigVersion;
@@ -332,7 +382,7 @@ static void tcpIntegration() {
   assert(bind(server,reinterpret_cast<sockaddr*>(&a),sizeof(a))==0 && listen(server,4)==0);socklen_t len=sizeof(a);assert(getsockname(server,reinterpret_cast<sockaddr*>(&a),&len)==0);
   fcntl(server,F_SETFL,O_NONBLOCK);QLabConfig cfg{};cfg.enabled=true;strcpy(cfg.host,"127.0.0.1");strcpy(cfg.workspace,"workspace-123");strcpy(cfg.passcode,"secret");cfg.port=ntohs(a.sin_port);cfg.closedExpiryMs=30000;
   cfg.events[3].enabled=true;strcpy(cfg.events[3].cue,"closed");cfg.events[9].enabled=true;strcpy(cfg.events[9].cue,"waiting");
-  testMillis=0;oscBegin();oscConfigure(cfg);int peer=-1;SlipDecoder decoder;unsigned closedStarts=0,liveStarts=0,auth=0,boolReplies=0,intReplies=0;bool suppressAck=false,badpass=false;
+  testMillis=0;oscBegin();oscConfigure(cfg);int peer=-1;SlipDecoder decoder;unsigned closedStarts=0,liveStarts=0,beamStarts=0,auth=0,boolReplies=0,intReplies=0;bool suppressAck=false,badpass=false;
   auto pump=[&] {
     testMillis+=5;oscLoop();
     if(peer<0){peer=accept(server,nullptr,nullptr);if(peer>=0){fcntl(peer,F_SETFL,O_NONBLOCK);decoder.reset();}}
@@ -346,7 +396,7 @@ static void tcpIntegration() {
           if(auth%2) {reply["data"]=true;++boolReplies;}
           else {reply["data"]=1;++intReplies;}
         }
-        else if(method.find("/cue/")!=String::npos){reply["workspace_id"]="workspace-123";if(method.find("/closed/")!=String::npos){++closedStarts;if(suppressAck)continue;}else ++liveStarts;}
+        else if(method.find("/cue/")!=String::npos){reply["workspace_id"]="workspace-123";if(method.find("/closed/")!=String::npos){++closedStarts;if(suppressAck)continue;}else if(method=="/workspace/workspace-123/cue/beam/start") ++beamStarts;else ++liveStarts;}
         String json;serializeJson(reply,json);auto bytes=frame(("/reply"+method).c_str(),json.c_str());
         // Deliberately fragment replies over successive sends.
         assert(send(peer,bytes.data(),3,0)==3);assert(send(peer,bytes.data()+3,bytes.size()-3,0)==static_cast<ssize_t>(bytes.size()-3));
@@ -363,6 +413,20 @@ static void tcpIntegration() {
   fakeDoor.pendingClosed=true;fakeDoor.pendingGeneration=1;
   until([]{return acknowledged==1;});for(int i=0;i<30;++i)pump();assert(closedStarts==1); // motor task has not cleared its snapshot yet
   fakeDoor.pendingClosed=false;live.push_back({9,testMillis});until([&]{return liveStarts==1;});
+  // Mapping off suppresses a live break, even with master triggers on.
+  live.push_back({static_cast<uint8_t>(kBeamBreakEvent),testMillis});
+  for(int j=0;j<30;++j)pump();assert(beamStarts==0);
+  cfg.events[kBeamBreakEvent].enabled=true;strcpy(cfg.events[kBeamBreakEvent].cue,"beam");
+  oscConfigure(cfg);until([]{return oscStatus().ready;});
+  live.push_back({static_cast<uint8_t>(kBeamBreakEvent),testMillis-1000});
+  for(int j=0;j<30;++j)pump();assert(beamStarts==0); // stale break
+  live.push_back({static_cast<uint8_t>(kBeamBreakEvent),testMillis});until([&]{return beamStarts==1;});
+  for(int j=0;j<30;++j)pump();assert(beamStarts==1);
+  ethOnline=false;pump();live.push_back({static_cast<uint8_t>(kBeamBreakEvent),testMillis});pump();
+  ethOnline=true;until([]{return oscStatus().ready;});for(int j=0;j<30;++j)pump();assert(beamStarts==1);
+  cfg.enabled=false;oscConfigure(cfg);live.push_back({static_cast<uint8_t>(kBeamBreakEvent),testMillis});
+  for(int j=0;j<30;++j)pump();assert(beamStarts==1);
+  cfg.enabled=true;oscConfigure(cfg);until([]{return oscStatus().ready;});assert(beamStarts==1);
   suppressAck=true;fakeDoor.pendingClosed=true;fakeDoor.pendingGeneration=2;until([&]{return closedStarts>=3;});assert(acknowledged==1);
   suppressAck=false;until([]{return acknowledged==2;});fakeDoor.pendingClosed=false;
   ethOnline=false;pump();assert(!oscStatus().ready);fakeDoor.pendingClosed=true;fakeDoor.pendingGeneration=3;live.push_back({9,testMillis});pump();unsigned before=liveStarts;
@@ -388,6 +452,7 @@ static void webIntegration() {
   };
   auto response=transact("GET","/");assert(response.find("200 OK")!=String::npos&&response.find("Motion tuning")!=String::npos);
   assert(response.find("Open door (test)")!=String::npos);
+  assert(response.find("Beam break fires once per new obstruction")!=String::npos);
   assert(response.find("Automatic IP address (DHCP)")!=String::npos&&response.find("Static IP address")==String::npos&&response.find("id=\"dhcp\"")==String::npos);
   response=transact("GET","/api/config");assert(response.find("200 OK")!=String::npos);
   JsonDocument doc;assert(!deserializeJson(doc,response.substr(response.find("\r\n\r\n")+4)));
@@ -448,4 +513,4 @@ static void mcpTests() {
   }
   std::cout<<"PASS MCP23008 safe startup, both door mappings/polarities, button inputs, NACK/short-read failure and recovery\n";
 }
-int main(){mcpTests();stateTests();openingRetryTests();configTests();codecTests();triggerTests();httpParserTests();tcpIntegration();webIntegration();std::cout<<"All native tests passed.\n";}
+int main(){mcpTests();stateTests();beamBreakTests();openingRetryTests();configTests();codecTests();triggerTests();httpParserTests();tcpIntegration();webIntegration();std::cout<<"All native tests passed.\n";}

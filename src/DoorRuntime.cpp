@@ -4,6 +4,7 @@
 #include "Mcp23008.h"
 #include <DoorMachine.h>
 #include <ClosedTrigger.h>
+#include <BeamBreakTrigger.h>
 #include <Wire.h>
 #include <Tic.h>
 #include <SSD1306Ascii.h>
@@ -52,6 +53,7 @@ void control(void *) {
   MotionConfig motion=initial;
   DoorMachine machine(motion,kRear);
   ClosedTrigger closed;
+  BeamBreakTrigger beamBreak;
   uint32_t expiry=initialExpiry,reservedAt=0,displayAt=0,watchdogAt=0;
   uint32_t losses=0,cycles=0; bool reserved=false,up=false,down=false;
   uint8_t displayRow=0;bool reservedChanging=false;
@@ -165,6 +167,10 @@ void control(void *) {
       if(machine.state()!=DoorState::Closed && (!liveReady || xQueueSend(events,&e,0)!=pdTRUE)) ++losses;
     }
     if(output.forced) {DoorEvent e{static_cast<uint8_t>(kForcedEvent),now};if(!liveReady || xQueueSend(events,&e,0)!=pdTRUE)++losses;}
+    if(beamBreak.observe(input.beam,machine.state(),machine.homed())) {
+      DoorEvent e{static_cast<uint8_t>(kBeamBreakEvent),now};
+      if(!liveReady || xQueueSend(events,&e,0)!=pdTRUE) ++losses;
+    }
     if(!mcpHealthy) upButton=downButton=false;
     DoorStatus s{};s.state=machine.state();s.homed=machine.homed();s.limit=input.limit;s.beam=input.beam;
     s.openingRetries=machine.openingRetries();s.openingRetryLimit=motion.openRetryLimit;

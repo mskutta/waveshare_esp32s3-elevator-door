@@ -5,7 +5,7 @@
 #include "MotionFields.h"
 
 const char *eventName(size_t e) {
-  static const char *names[] = {"unknown", "homing", "close", "closed", "closing", "open", "opening", "reopen", "reopening", "waiting", "fault", "forced"};
+  static const char *names[] = {"unknown", "homing", "close", "closed", "closing", "open", "opening", "reopen", "reopening", "waiting", "fault", "forced", "beam_break"};
   return e < kEventCount ? names[e] : "invalid";
 }
 AppConfig defaultConfig(bool rear) {

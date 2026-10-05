@@ -74,6 +74,10 @@ bool configLoad(AppConfig &c, bool rear) {
         if(supported<divisor) divisor=supported;
       }
       m["openRetryDivisor"]=divisor?divisor:1;
+    }
+    if(version>=1 && version<=3) {
+      auto beam=doc["qlab"]["events"][eventName(kBeamBreakEvent)].to<JsonObject>();
+      beam["enabled"]=false;beam["cue"]="";
       doc["version"]=kConfigVersion;
     }
   }
