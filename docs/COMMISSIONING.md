@@ -1,6 +1,6 @@
 # Commissioning and acceptance
 
-Software verification completed: `frontdoor`, `reardoor`, and motor-inhibited `bench` builds; host tests with sanitizers and a localhost QLab mock. These do not certify the wiring, actual NVS, encoder counter under load, physical motion, or the installed QLab workspace. No ESP32 USB device was connected during implementation.
+Software verification completed: `frontdoor`, `reardoor`, and motor-inhibited `bench` builds; host tests with sanitizers and a localhost QLab mock. These do not certify the wiring, actual NVS, encoder counter under load, physical motion, or the installed QLab workspace. The retry changes have not been uploaded or physically exercised by this software verification.
 
 ## 1. Electrical checks and USB
 
@@ -14,9 +14,9 @@ Software verification completed: `frontdoor`, `reardoor`, and motor-inhibited `b
 ## 2. Settings and networking
 
 1. Save/reload settings and reboot; confirm NVS persistence and correct front/rear namespaces. Confirm first boot starts with QLab mappings disabled.
-2. Check invalid JSON, invalid numeric/string types, oversized strings, impossible travel/deadlines, and attempted network/static-IP overrides are rejected without altering saved settings.
+2. Check retry defaults (2 attempts, 1,000 ms pause, divisor 3, tolerance 128). Reject limit above 3, pause outside 100–5,000 ms, divisor outside 1–10, nonpositive tolerance or tolerance above 5% of travel, and derived retry speed/acceleration below Tic limits. Check invalid JSON, invalid numeric/string types, oversized strings, impossible travel/deadlines, and attempted network/static-IP overrides are rejected without altering saved settings.
 3. Confirm motion saves require closed, homed, released, healthy hardware. Attempt an open during a save; it must not be deferred into a later cycle.
-4. Confirm the controller acquires a DHCP address on boot, including after loading old version-1 settings with static addressing selected. Verify those old settings retain motion tuning and QLab mappings. Confirm the web page has no address-setting controls and the API rejects network overrides. Run USB `network-reset`; verify DHCP reacquires an address and motion/cue mappings remain unchanged. Identify the acquired address via OLED, USB status, or DHCP leases.
+4. Confirm the controller acquires a DHCP address on boot, including after loading old version-1 settings with static addressing selected. Verify saved versions 1 and 2 retain motion tuning and QLab settings while adding retry defaults; the next save must report schema 3. Test small-travel/low-acceleration legacy tuning, whose tolerance/divisor may be reduced to remain valid. Confirm the web page has no address-setting controls and the API rejects network overrides. Run USB `network-reset`; verify DHCP reacquires an address and motion/cue mappings remain unchanged. Identify the acquired address via OLED, USB status, or DHCP leases.
 5. Remove the Ethernet cable and restore it, including while a slow browser request is pending. Motor control must continue, diagnostics must reflect link state, and incoming stale partial frames must not execute after recovery.
 
 ## 3. Controlled motion, each production profile
@@ -24,19 +24,23 @@ Software verification completed: `frontdoor`, `reardoor`, and motor-inhibited `b
 1. Verify travel/mechanism and load-clear conditions; upload the correct production profile. Boot with switch active, then inactive. Confirm no automatic startup motion in either case and no startup closed cue.
 2. Manually close to establish position. Open, finish opening, dwell, close, and confirm switch-based zero. Verify front 10-minute dwell and faster normal opening; rear 5-second dwell and slower normal opening. Reopening uses the fast speed and 2-second dwell.
 3. Verify both the web **Open door (test)** button and OSC requests open from confirmed closed. Repeated opens during opening/waiting must not extend dwell; an open during closing reopens. Confirm the web button cannot bypass unknown position, faults, or a settings-save reservation. Test opening follows the normal cycle and can start configured QLab event cues.
-4. Break the beam during opening, waiting, and closing. Confirm local dwell/reopening behavior. A broken beam at a just-expired dwell must prevent closing.
+4. Break the beam during opening, waiting, and closing. Confirm opening and retries continue with the beam broken, waiting prevents closing, and closing reopens. A broken beam at a just-expired dwell must prevent closing.
 5. Check closing homing at low load. Beam obstruction during final homing must stop/release and fault. Test opening, closing, and homing deadlines using controlled conditions; motor release, fault display, and operator reset are required.
 6. Test encoder drift thresholds and forced events with controlled resistance/manual movement. Verify no encoder-count discontinuity while the web page polls and Ethernet is busy. With the actual cable length and motor running, check counts through repeated cycles at maximum configured speed. If the internal pull-ups give missed/noisy pulses, fit external 4.7 kΩ A/B pull-ups to 3.3 V and repeat these checks.
-7. Interrupt Tic communications under controlled conditions. Confirm fault and the Tic's independent timeout response even when I²C release cannot be delivered. Restore communications, reset the fault, and manually reconfirm closed. No recovery closed cue should fire.
+7. Before inducing retries, verify encoder accuracy against actual movement under motor load. Missed encoder pulses can resemble motor slip; compare both measured travel and reported counts. Under controlled load, test an early stall, partial progress followed by recovery, and a Tic target reached with insufficient encoder travel. Verify one-second motor release, latest-position Tic synchronization without encoder zeroing, and reduced retry speed/acceleration with unchanged current/deceleration. Verify backward movement during the pause is reflected in the next attempt.
+8. Confirm two retries after the first attempt, repeated commands cannot refill the budget, and reopening uses the remaining budget. Verify retry pauses do not repeat ordinary opening cues. Test exhaustion and a deadline expiring during a pause: release and latched fault, followed by operator reset and manual closed confirmation. All retry pauses must consume the original opening deadline. Host tests cover timer rollover; confirm elapsed timing on hardware.
+9. Verify closed-cue eligibility remains false below 18,472 microsteps with default travel, or while the closed switch remains active. Confirm a recovered opening can qualify, while partial forced opening, failed retries, timeout, and fault recovery cannot create a pending closed trigger. Repeat with the beam broken.
+10. Interrupt Tic communications under controlled conditions. Confirm fault and the Tic's independent timeout response even when I²C release cannot be delivered. Restore communications, reset the fault, and manually reconfirm closed. No recovery closed cue should fire.
 
 ## 4. Actual QLab 5
 
 1. Configure both TCP/SLIP output patches. Verify only the matching controller's address opens each door, and UDP/length-prefix/argument-bearing commands cannot trigger it.
 2. Configure the chosen workspace, control permissions/passcode, and event cue mappings. Verify authentication, `/alwaysReply`, cue targeting, and diagnostics against the actual QLab version.
-3. Set up and test the QLab-side idempotency guard on the sequence-advancing closed cue. Test a closed cycle with QLab disconnected, then reconnect within expiry: exactly one slot should be pending; duplicate starts must not advance the sequence again.
+3. Set up and test the QLab-side idempotency guard on the sequence-advancing closed cue. Test an encoder-qualified closed cycle with QLab disconnected, then reconnect within expiry: exactly one slot should be pending; duplicate starts must not advance the sequence again.
 4. Drop a reply/connection after sending closed. Verify retries, successful acknowledgment clearing, expiry, and no extra send after acknowledgment.
 5. Reopen before delivery; verify cancellation. Repeat with expiry, controller reboot, and loss of switch confirmation. Reconnection by itself must not trigger closed.
-6. Confirm other offline events are not replayed. Restart QLab and unplug/replug Ethernet during motion; local control must continue.
+6. Run partial/failed opening and fault-recovery cases with QLab connected; the sequence-advancing closed cue must not start. A successful retry followed by closure must retain acknowledgment, expiry, and cancellation behavior.
+7. Confirm other offline events are not replayed. Restart QLab and unplug/replug Ethernet during motion; local control must continue.
 
 Record measured encoder direction/rate, voltages, full-travel timing, tuned values, firmware environment, QLab version/workspace ID, and acceptance results for each physical door. Back up the final `/api/config` JSON.
 

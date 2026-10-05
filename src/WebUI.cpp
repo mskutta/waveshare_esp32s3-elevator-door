@@ -34,6 +34,9 @@ void state() {
   doc["homed"]=s.homed;doc["limit"]=s.limit;doc["beam"]=s.beam;doc["energized"]=s.energized;
   doc["mcpHealthy"]=s.mcpHealthy;doc["upButtonPressed"]=s.upButton;doc["downButtonPressed"]=s.downButton;
   doc["ticHealthy"]=s.healthy;doc["maintenance"]=s.maintenance;doc["upOutputActive"]=s.upOutput;doc["downOutputActive"]=s.downOutput;
+  doc["openingRetries"]=s.openingRetries;doc["openingRetryLimit"]=s.openingRetryLimit;
+  doc["openingRetryPaused"]=s.openingRetryPaused;doc["openingRetryActive"]=s.openingRetryActive;
+  doc["closedCueEligible"]=s.closedCueEligible;doc["openingThreshold"]=s.openingThreshold;
   doc["encoderCounts"]=s.encoderCounts;doc["encoderPosition"]=s.encoderPosition;doc["motorPosition"]=s.motorPosition;doc["targetPosition"]=s.targetPosition;
   doc["fault"]=s.fault;doc["pendingClosed"]=s.pendingClosed;doc["pendingAgeMs"]=s.pendingAgeMs;
   doc["pendingGeneration"]=s.pendingGeneration;doc["cycles"]=s.cycles;doc["droppedLiveEvents"]=s.lostLiveEvents;

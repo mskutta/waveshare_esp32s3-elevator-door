@@ -26,6 +26,8 @@ void serialLoop() {
       } else if(!strcmp(command,"status")) {
         auto s=doorStatus();Serial.printf("%s state=%s encoder=%ld motor=%ld limit=%u beam=%u mcp=%u buttons=%u/%u pending=%u fault=%s ip=%s\n",
           kDoorName,eventName(static_cast<size_t>(s.state)),static_cast<long>(s.encoderPosition),static_cast<long>(s.motorPosition),s.limit,s.beam,s.mcpHealthy,s.upButton,s.downButton,s.pendingClosed,s.fault,ethernetIP().toString().c_str());
+        Serial.printf("Opening progress=%ld/%ld retries=%u/%u retryPaused=%u retryActive=%u closedCueEligible=%u\n",
+          static_cast<long>(s.encoderPosition),static_cast<long>(s.openingThreshold),s.openingRetries,s.openingRetryLimit,s.openingRetryPaused,s.openingRetryActive,s.closedCueEligible);
       } else if(commandSize) Serial.println("Commands: status, network-reset");
       commandSize=0;commandOverflow=false;
     } else if(commandSize<sizeof(command)-1) command[commandSize++]=c;

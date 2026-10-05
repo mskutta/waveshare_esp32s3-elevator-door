@@ -1,6 +1,7 @@
 #include "Config.h"
 #include <Preferences.h>
 #include <MotionFields.h>
+#include <initializer_list>
 
 void configToJson(const AppConfig &c, JsonDocument &doc) {
   doc.clear();
@@ -56,10 +57,25 @@ bool configLoad(AppConfig &c, bool rear) {
   String stored=p.getString("config"); p.end();
   JsonDocument doc; String error;
   if(deserializeJson(doc,stored)) return false;
-  // Version 1 had configurable static IP fields. Retire those fields only;
-  // retain validated motion settings, credentials, and cue mappings.
-  if(doc["version"].is<uint32_t>() && doc["version"].as<uint32_t>()==1) {
-    doc.remove("network");doc["version"]=kConfigVersion;
+  if(doc["version"].is<uint32_t>()) {
+    uint32_t version=doc["version"].as<uint32_t>();
+    if(version==1 || version==2) {
+      if(version==1) doc.remove("network");
+      auto m=doc["motion"].as<JsonObject>();
+      m["openRetryLimit"]=c.motion.openRetryLimit;
+      m["openRetryPauseMs"]=c.motion.openRetryPauseMs;
+      // Preserve valid legacy tuning at the low end of its allowed range.
+      // Small travel needs a smaller tolerance; slow profiles need divisor 1.
+      int32_t tolerance=m["travel"].as<int32_t>()/20;
+      m["openCompletionTolerance"]=tolerance<c.motion.openCompletionTolerance?tolerance:c.motion.openCompletionTolerance;
+      uint32_t divisor=c.motion.openRetryDivisor;
+      for(uint32_t supported:{m["openSpeed"].as<uint32_t>()/10000,
+          m["reopenSpeed"].as<uint32_t>()/10000,m["openAccel"].as<uint32_t>()/100}) {
+        if(supported<divisor) divisor=supported;
+      }
+      m["openRetryDivisor"]=divisor?divisor:1;
+      doc["version"]=kConfigVersion;
+    }
   }
   return configFromJson(doc,c,error);
 }

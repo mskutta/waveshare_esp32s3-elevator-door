@@ -45,7 +45,7 @@ static void stateTests() {
   for(bool rear:{false,true}) {
     auto c=defaultConfig(rear);const char *error;assert(validateConfig(c,error));
     assert(c.motion.dwellMs==(rear?5000:600000));assert(c.motion.openSpeed==(rear?20000000:90000000));
-    assert(c.motion.openAccel==300000);
+    assert(c.motion.openAccel==400000);
     DoorMachine door(c.motion,rear);auto i=input(0xfffffff0);
     assert(door.tick(i,true).motor==MotorAction::None);assert(!door.homed());
     i.limit=true;auto o=door.tick(i);assert(o.zeroEncoder && !o.closedCycle);assert(door.canTune(i));
@@ -94,9 +94,112 @@ static void stateTests() {
   for(int direction:{-1,1}) {
     DoorMachine d(c.motion,false);auto x=input();x.limit=true;d.tick(x);d.tick(x,true);x.now=250;d.tick(x);
     x.limit=false;x.targetPosition=c.motion.travel;x.encoderPosition=1000;x.motorPosition=1000+direction*129;x.now+=5;
-    auto forced=d.tick(x);assert(forced.forced&&d.state()==DoorState::Waiting&&forced.motor==MotorAction::Release);
+    auto forced=d.tick(x);assert(forced.motor==MotorAction::Release);
+    if(direction<0) assert(forced.forced&&d.state()==DoorState::Waiting);
+    else assert(!forced.forced&&d.state()==DoorState::Opening&&d.retryPaused());
   }
   std::cout<<"PASS door state machine, defaults, deadlines, faults, rollover timing\n";
+}
+static void openingRetryTests() {
+  auto start=[](DoorMachine &d,DoorInput &i,const MotionConfig &m,uint32_t now=0) {
+    i=input(now);i.limit=true;assert(d.tick(i).zeroEncoder);assert(!d.closedCueEligible());
+    ++i.now;assert(d.tick(i,true).motor==MotorAction::Release);
+    i.now+=m.settleMs;assert(d.tick(i).motor==MotorAction::Open);
+    i.limit=false;i.targetPosition=m.travel;
+  };
+  auto close=[](DoorMachine &d,DoorInput &i,const MotionConfig &m,uint32_t dwell) {
+    i.beam=false;i.now+=dwell;assert(d.tick(i).motor==MotorAction::Release);
+    i.now+=m.settleMs;assert(d.tick(i).motor==MotorAction::Close);
+    i.motorPosition=i.encoderPosition=i.targetPosition=0;++i.now;
+    assert(d.tick(i).motor==MotorAction::Home);
+    i.limit=true;++i.now;return d.tick(i);
+  };
+  for(bool rear:{false,true}) {
+    auto m=defaultConfig(rear).motion;DoorInput i;
+    for(auto action:{MotorAction::RetryOpen,MotorAction::RetryReopen}) {
+      auto settings=motorSettings(m,action);
+      assert(settings.opening&&!settings.homing&&settings.current==m.openCurrent&&settings.deceleration==m.openDecel);
+      assert(settings.acceleration==m.openAccel/3);
+      assert(settings.speed==(action==MotorAction::RetryOpen?m.openSpeed:m.reopenSpeed)/3);
+    }
+    assert(motorSettings(m,MotorAction::Open).speed==m.openSpeed);
+    assert(motorSettings(m,MotorAction::Reopen).speed==m.reopenSpeed);
+    assert(motorSettings(m,MotorAction::Close).current==m.closeCurrent);
+    assert(motorSettings(m,MotorAction::Home).homing);
+    // Lost steps with the beam broken: pause, retry from measured progress,
+    // ignore repeated opens, and qualify only once encoder travel is sufficient.
+    DoorMachine d(m,rear);start(d,i,m);i.beam=true;i.motorPosition=500;i.encoderPosition=100;++i.now;
+    auto out=d.tick(i,true);assert(out.motor==MotorAction::Release&&!out.changed&&!out.forced);
+    assert(d.retryPaused()&&d.openingRetries()==1&&!d.closedCueEligible());
+    i.now+=m.openRetryPauseMs-1;i.encoderPosition=75;
+    assert(d.tick(i,true).motor==MotorAction::None&&d.openingRetries()==1);
+    ++i.now;out=d.tick(i,true);assert(out.motor==MotorAction::RetryOpen&&!out.changed&&!out.zeroEncoder);
+    assert(d.retryActive()&&!d.retryPaused()&&i.encoderPosition==75);
+    // Runtime rebases only the Tic before energizing the retry.
+    i.motorPosition=i.encoderPosition;i.targetPosition=m.travel;++i.now;
+    assert(d.tick(i,true).motor==MotorAction::None&&d.openingRetries()==1);
+    i.encoderPosition=i.motorPosition=d.openingThreshold()-1;++i.now;
+    assert(d.tick(i).motor==MotorAction::None&&!d.closedCueEligible());
+    ++i.encoderPosition;++i.motorPosition;i.limit=true;++i.now;
+    assert(d.tick(i).motor==MotorAction::None&&!d.closedCueEligible());
+    i.limit=false;++i.now;out=d.tick(i);
+    assert(out.motor==MotorAction::Release&&d.state()==DoorState::Waiting&&d.closedCueEligible()&&!d.retryActive());
+    i.now+=m.dwellMs;assert(d.tick(i).motor==MotorAction::None&&d.state()==DoorState::Waiting); // beam blocks closing
+    out=close(d,i,m,m.shortDwellMs);assert(out.closedCycle&&out.zeroEncoder&&!d.closedCueEligible());
+    ClosedTrigger pending;if(out.closedCycle)pending.offer(i.now);assert(pending.pending());
+
+    // A Tic that reports target reached at a short encoder distance is retried,
+    // then faults after exactly two retries. A held closed switch cannot qualify.
+    DoorMachine failed(m,rear);start(failed,i,m);i.limit=true;i.motorPosition=i.targetPosition=m.travel;i.encoderPosition=10;
+    for(unsigned retry=1;retry<=2;++retry) {
+      ++i.now;out=failed.tick(i,true);assert(out.motor==MotorAction::Release&&failed.retryPaused());
+      assert(failed.openingRetries()==retry&&!failed.closedCueEligible());
+      i.now+=m.openRetryPauseMs;assert(failed.tick(i,true).motor==MotorAction::RetryOpen);
+    }
+    ++i.now;out=failed.tick(i,true);assert(out.motor==MotorAction::Release&&failed.state()==DoorState::Fault);
+    assert(!out.closedCycle&&!failed.closedCueEligible()&&!failed.retryPaused()&&!failed.retryActive());
+    assert(!strcmp(failed.faultReason(),"Opening retries exhausted"));
+    i.energized=true;failed.tick(i,false,true);assert(failed.state()==DoorState::Fault);
+    i.energized=false;i.limit=false;failed.tick(i,false,true);assert(failed.state()==DoorState::Unknown);
+    i.limit=true;out=failed.tick(i);assert(out.zeroEncoder&&!out.closedCycle);pending.cancel();assert(!pending.pending());
+
+    // Encoder-leading forced movement keeps existing behavior, but returning
+    // closed after a partial opening never creates a closed trigger.
+    DoorMachine partial(m,rear);start(partial,i,m);i.encoderPosition=1000;i.motorPosition=800;++i.now;
+    out=partial.tick(i);assert(out.forced&&partial.state()==DoorState::Waiting&&!partial.closedCueEligible());
+    out=close(partial,i,m,m.shortDwellMs);assert(!out.closedCycle&&out.zeroEncoder);
+    if(out.closedCycle)pending.offer(i.now);assert(!pending.pending());
+
+    // Initial retry consumption carries into obstruction-driven reopening.
+    DoorMachine shared(m,rear);start(shared,i,m);i.motorPosition=200;++i.now;shared.tick(i);
+    i.now+=m.openRetryPauseMs;shared.tick(i);i.motorPosition=i.encoderPosition=m.travel;++i.now;shared.tick(i);
+    assert(shared.closedCueEligible()&&shared.openingRetries()==1);
+    i.now+=m.dwellMs;shared.tick(i);i.now+=m.settleMs;shared.tick(i);
+    i.targetPosition=0;i.motorPosition=i.encoderPosition=1000;i.beam=true;++i.now;
+    assert(shared.tick(i).motor==MotorAction::Release&&shared.state()==DoorState::Reopen);
+    i.now+=m.settleMs;assert(shared.tick(i).motor==MotorAction::Reopen);
+    i.targetPosition=m.travel;i.motorPosition=1500;i.encoderPosition=1000;++i.now;
+    assert(shared.tick(i,true).motor==MotorAction::Release&&shared.openingRetries()==2);
+    i.now+=m.openRetryPauseMs;assert(shared.tick(i,true).motor==MotorAction::RetryReopen);
+    ++i.now;assert(shared.tick(i,true).motor==MotorAction::Release&&shared.state()==DoorState::Fault);
+    assert(!shared.closedCueEligible());
+  }
+  // Deadline spans pauses and both attempts, including uint32 rollover.
+  for(uint32_t origin:{0u,0xffffff00u}) {
+    auto m=defaultConfig(false).motion;m.openTimeoutMs=1500;DoorMachine d(m,false);DoorInput i;start(d,i,m,origin);
+    uint32_t begun=i.now;i.now+=100;i.motorPosition=1000;i.encoderPosition=0;d.tick(i);
+    i.now+=m.openRetryPauseMs;assert(d.tick(i,true).motor==MotorAction::RetryOpen);
+    i.motorPosition=i.encoderPosition=500;i.now=begun+1499;assert(d.tick(i).motor==MotorAction::None);
+    ++i.now;assert(d.tick(i).motor==MotorAction::Release&&d.state()==DoorState::Fault&&!d.closedCueEligible());
+  }
+  auto m=defaultConfig(false).motion;m.openTimeoutMs=500;m.openRetryPauseMs=1000;DoorMachine paused(m,false);DoorInput i;start(paused,i,m);
+  i.motorPosition=1000;++i.now;paused.tick(i);i.now+=500;
+  assert(paused.tick(i).motor==MotorAction::Release&&paused.state()==DoorState::Fault);
+  m=defaultConfig(false).motion;m.openRetryLimit=0;DoorMachine disabled(m,false);start(disabled,i,m);i.motorPosition=1000;++i.now;
+  assert(disabled.tick(i).motor==MotorAction::Release&&disabled.state()==DoorState::Fault&&disabled.openingRetries()==0);
+  m=defaultConfig(false).motion;DoorMachine communication(m,false);start(communication,i,m);i.motorPosition=1000;++i.now;communication.tick(i);
+  i.ticHealthy=false;assert(communication.tick(i).motor==MotorAction::Release&&communication.state()==DoorState::Fault&&!communication.retryPaused());
+  std::cout<<"PASS opening retries, encoder-only completion, short-cycle suppression, shared reopening budget, beam behavior, fault recovery, deadline rollover\n";
 }
 static void configTests() {
   const char *why;auto c=defaultConfig(false);JsonDocument doc;configToJson(c,doc);AppConfig decoded;String error;
@@ -113,22 +216,55 @@ static void configTests() {
   c.motion.openTimeoutMs=100;assert(!validateConfig(c,why));c=defaultConfig(false);
   c.motion.closeCurrent=3094;assert(!validateConfig(c,why));c=defaultConfig(false);
   // Old static or dynamic settings must not prevent loading motion/QLab data.
-  for(bool rear:{false,true}) for(bool oldDhcp:{false,true}) {
-    auto old=defaultConfig(rear);old.motion.travel=19000;old.qlab.enabled=true;
+  for(bool rear:{false,true}) for(bool oldDhcp:{false,true}) for(uint32_t version:{1u,2u}) {
+    auto old=defaultConfig(rear);old.motion.travel=19000;old.motion.openAccel=400000;old.qlab.enabled=true;
     strcpy(old.qlab.host,"192.168.1.10");strcpy(old.qlab.workspace,"saved-workspace");
     strcpy(old.qlab.passcode,"saved-passcode");old.qlab.events[3].enabled=true;strcpy(old.qlab.events[3].cue,"42");
-    configToJson(old,doc);assert(doc["network"].isUnbound());doc["version"]=1;
-    doc["network"]["dhcp"]=oldDhcp;doc["network"]["ip"]="192.168.1.50";
-    doc["network"]["mask"]="255.255.255.0";doc["network"]["gateway"]="192.168.1.1";doc["network"]["dns"]="192.168.1.1";
+    configToJson(old,doc);assert(doc["network"].isUnbound());doc["version"]=version;
+    for(const char *field:{"openRetryLimit","openRetryDivisor","openRetryPauseMs","openCompletionTolerance"})doc["motion"].remove(field);
+    if(version==1) {doc["network"]["dhcp"]=oldDhcp;doc["network"]["ip"]="192.168.1.50";
+    doc["network"]["mask"]="255.255.255.0";doc["network"]["gateway"]="192.168.1.1";doc["network"]["dns"]="192.168.1.1";}
     String stored;serializeJson(doc,stored);Preferences::storage[rear?"door-rear":"door-front"]["config"]=stored;
     assert(configLoad(decoded,rear)&&sameMotion(decoded.motion,old.motion));
     assert(decoded.qlab.enabled&&!strcmp(decoded.qlab.passcode,"saved-passcode")&&
       !strcmp(decoded.qlab.workspace,"saved-workspace")&&decoded.qlab.events[3].enabled&&!strcmp(decoded.qlab.events[3].cue,"42"));
+    assert(decoded.motion.openRetryLimit==2&&decoded.motion.openRetryDivisor==3&&decoded.motion.openRetryPauseMs==1000&&decoded.motion.openCompletionTolerance==128);
     configToJson(decoded,doc);assert(doc["version"]==kConfigVersion&&doc["network"].isUnbound());
     // API only accepts the current schema, without network override fields.
     doc["network"]["dhcp"]=false;assert(!configFromJson(doc.as<JsonVariantConst>(),decoded,error));
     assert(error.find("DHCP-only")!=String::npos);doc.remove("network");doc["version"]=1;
     assert(!configFromJson(doc.as<JsonVariantConst>(),decoded,error));
+  }
+  for(int bad=0;bad<8;++bad) {
+    c=defaultConfig(false);
+    switch(bad) {
+      case 0:c.motion.openRetryLimit=4;break;
+      case 1:c.motion.openRetryDivisor=0;break;
+      case 2:c.motion.openRetryDivisor=11;break;
+      case 3:c.motion.openRetryPauseMs=99;break;
+      case 4:c.motion.openRetryPauseMs=5001;break;
+      case 5:c.motion.openCompletionTolerance=0;break;
+      case 6:c.motion.openCompletionTolerance=c.motion.travel/20+1;break;
+      default:c.motion.openAccel=100;break;
+    }
+    assert(!validateConfig(c,why));
+  }
+  c=defaultConfig(false);c.motion.openRetryLimit=0;c.motion.openAccel=100;
+  c.motion.openTimeoutMs=600000;assert(validateConfig(c,why));
+  configToJson(defaultConfig(false),doc);doc["motion"]["openRetryLimit"]=256;
+  assert(!configFromJson(doc.as<JsonVariantConst>(),decoded,error));
+  configToJson(defaultConfig(false),doc);doc["motion"].remove("openRetryPauseMs");
+  assert(!configFromJson(doc.as<JsonVariantConst>(),decoded,error));
+  // Migration retains old short-travel/low-acceleration tuning, adjusting only
+  // the new tolerance/divisor to fit those previously supported values.
+  for(uint32_t version:{1u,2u}) {
+    auto old=defaultConfig(false);old.motion.travel=160;old.motion.openAccel=100;old.motion.openTimeoutMs=600000;
+    configToJson(old,doc);doc["version"]=version;
+    for(const char *field:{"openRetryLimit","openRetryDivisor","openRetryPauseMs","openCompletionTolerance"})doc["motion"].remove(field);
+    String stored;serializeJson(doc,stored);Preferences::storage["door-front"]["config"]=stored;
+    assert(configLoad(decoded,false));assert(decoded.motion.travel==160&&decoded.motion.openAccel==100&&decoded.motion.openTimeoutMs==600000);
+    assert(decoded.motion.openCompletionTolerance==8&&decoded.motion.openRetryDivisor==1&&decoded.motion.openRetryLimit==2);
+    assert(configSave(decoded));assert(configLoad(decoded,false)&&decoded.motion.openRetryDivisor==1);
   }
   c=defaultConfig(false);c.qlab.enabled=true;strcpy(c.qlab.host,"127.0.0.1");assert(!validateConfig(c,why));assert(std::string(why).find("workspace ID is required")!=std::string::npos);
   strcpy(c.qlab.workspace,"abc-123");assert(validateConfig(c,why));c.qlab.events[3].enabled=true;strcpy(c.qlab.events[3].cue,"../go");assert(!validateConfig(c,why));
@@ -255,7 +391,13 @@ static void webIntegration() {
   assert(response.find("Automatic IP address (DHCP)")!=String::npos&&response.find("Static IP address")==String::npos&&response.find("id=\"dhcp\"")==String::npos);
   response=transact("GET","/api/config");assert(response.find("200 OK")!=String::npos);
   JsonDocument doc;assert(!deserializeJson(doc,response.substr(response.find("\r\n\r\n")+4)));
+  fakeDoor.openingRetries=1;fakeDoor.openingRetryLimit=2;fakeDoor.openingRetryPaused=true;
+  fakeDoor.openingThreshold=18472;fakeDoor.closedCueEligible=true;
   response=transact("GET","/api/state");assert(response.find("elev-door-front")!=String::npos);
+  JsonDocument statusDoc;assert(!deserializeJson(statusDoc,response.substr(response.find("\r\n\r\n")+4)));
+  assert(statusDoc["openingRetries"]==1&&statusDoc["openingRetryLimit"]==2&&statusDoc["openingRetryPaused"]==true);
+  assert(statusDoc["openingThreshold"]==18472&&statusDoc["closedCueEligible"]==true);
+
   unsigned beforeOpen=opens;
   assert(transact("GET","/api/door/open").find("404 Not Found")!=String::npos&&opens==beforeOpen);
   response=transact("POST","/api/door/open");
@@ -306,4 +448,4 @@ static void mcpTests() {
   }
   std::cout<<"PASS MCP23008 safe startup, both door mappings/polarities, button inputs, NACK/short-read failure and recovery\n";
 }
-int main(){mcpTests();stateTests();configTests();codecTests();triggerTests();httpParserTests();tcpIntegration();webIntegration();std::cout<<"All native tests passed.\n";}
+int main(){mcpTests();stateTests();openingRetryTests();configTests();codecTests();triggerTests();httpParserTests();tcpIntegration();webIntegration();std::cout<<"All native tests passed.\n";}

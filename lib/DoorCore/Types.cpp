@@ -11,8 +11,8 @@ const char *eventName(size_t e) {
 AppConfig defaultConfig(bool rear) {
   AppConfig c{};
   c.motion = {18600, rear ? 20000000u : 90000000u, 90000000, 30000000, 10000000,
-    300000, 700000, 100000, 100000, 100000, 100000, 1500, 900, 1500,
-    rear ? 5000u : 600000u, 2000, 250, 30000, 30000, 5000, 64, 128};
+    400000, 700000, 100000, 100000, 100000, 100000, 1500, 900, 1500,
+    rear ? 5000u : 600000u, 2000, 250, 30000, 30000, 5000, 64, 128, 2, 3, 1000, 128};
   c.qlab.port = 53000; c.qlab.closedExpiryMs = 30000;
   return c;
 }
@@ -28,6 +28,18 @@ bool sameMotion(const MotionConfig &a, const MotionConfig &b) {
 #undef COMPARE
   return true;
 }
+MotorSettings motorSettings(const MotionConfig &m,MotorAction action) {
+  bool retry=action==MotorAction::RetryOpen || action==MotorAction::RetryReopen;
+  bool reopen=action==MotorAction::Reopen || action==MotorAction::RetryReopen;
+  bool opening=action==MotorAction::Open || reopen || retry;
+  bool home=action==MotorAction::Home;
+  uint32_t divisor=retry?m.openRetryDivisor:1;
+  return {opening,home,
+    home?m.homingSpeed:opening?(reopen?m.reopenSpeed:m.openSpeed)/divisor:m.closeSpeed,
+    home?m.homingAccel:opening?m.openAccel/divisor:m.closeAccel,
+    home?m.homingDecel:opening?m.openDecel:m.closeDecel,
+    home?m.homingCurrent:opening?m.openCurrent:m.closeCurrent};
+}
 bool validateConfig(const AppConfig &c, const char *&error) {
   const auto &m = c.motion;
   error = "invalid motion settings";
@@ -39,6 +51,13 @@ bool validateConfig(const AppConfig &c, const char *&error) {
   for (auto v : {m.dwellMs, m.shortDwellMs}) if (v < 100 || v > 3600000) return false;
   if (m.settleMs > 5000) return false;
   for (auto v : {m.openTimeoutMs, m.closeTimeoutMs, m.homingTimeoutMs}) if (v < 100 || v > 600000) return false;
+  error = "invalid opening retry/completion settings";
+  if(m.openRetryLimit>3 || m.openRetryDivisor<1 || m.openRetryDivisor>10 ||
+     m.openRetryPauseMs<100 || m.openRetryPauseMs>5000 ||
+     m.openCompletionTolerance<1 || m.openCompletionTolerance>m.travel/20) return false;
+  if(m.openRetryLimit && (m.openSpeed/m.openRetryDivisor<10000 ||
+     m.reopenSpeed/m.openRetryDivisor<10000 || m.openAccel/m.openRetryDivisor<100)) return false;
+  error = "invalid motion settings";
   // Reject deadlines below even an ideal, zero-start-speed trapezoidal move.
   auto minimumMs = [&](uint32_t speed, uint32_t accel, uint32_t decel) {
     double v = speed / 10000.0, a = accel / 100.0, d = decel / 100.0;

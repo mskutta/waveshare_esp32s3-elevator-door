@@ -5,7 +5,9 @@ struct DoorStatus {
   DoorState state;
   bool homed, limit, beam, energized, healthy, maintenance, upOutput, downOutput;
   bool mcpHealthy, upButton, downButton;
-  bool pendingClosed;
+  bool pendingClosed, openingRetryPaused, openingRetryActive, closedCueEligible;
+  uint8_t openingRetries, openingRetryLimit;
+  int32_t openingThreshold;
   int32_t encoderPosition, motorPosition, targetPosition;
   int64_t encoderCounts;
   uint32_t pendingAgeMs, pendingGeneration, lostLiveEvents, cycles;

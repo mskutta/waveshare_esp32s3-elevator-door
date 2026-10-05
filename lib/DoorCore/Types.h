@@ -16,6 +16,9 @@ struct MotionConfig {
   uint16_t openCurrent, closeCurrent, homingCurrent;
   uint32_t dwellMs, shortDwellMs, settleMs, openTimeoutMs, closeTimeoutMs, homingTimeoutMs;
   int32_t closeDrift, openDrift;
+  uint8_t openRetryLimit, openRetryDivisor;
+  uint32_t openRetryPauseMs;
+  int32_t openCompletionTolerance;
 };
 struct CueMapping { bool enabled; char cue[40]; };
 struct QLabConfig {
@@ -36,7 +39,13 @@ struct DoorInput {
   bool limit, beam, ticHealthy, energized;
   int32_t motorPosition, targetPosition, encoderPosition;
 };
-enum class MotorAction : uint8_t { None, Release, Open, Reopen, Close, Home };
+enum class MotorAction : uint8_t { None, Release, Open, Reopen, Close, Home, RetryOpen, RetryReopen };
+struct MotorSettings {
+  bool opening, homing;
+  uint32_t speed, acceleration, deceleration;
+  uint16_t current;
+};
+MotorSettings motorSettings(const MotionConfig &, MotorAction);
 struct DoorOutput {
   MotorAction motor = MotorAction::None;
   bool zeroEncoder = false;

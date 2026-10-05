@@ -68,16 +68,16 @@ void control(void *) {
     (void)position;
     return false;
 #else
-    bool opening=action==MotorAction::Open || action==MotorAction::Reopen;
-    bool home=action==MotorAction::Home;
+    auto settings=motorSettings(motion,action);
+    bool opening=settings.opening,home=settings.homing;
     TIC(setStepMode(TicStepMode::Microstep8));
-    TIC(setCurrentLimit(home?motion.homingCurrent:opening?motion.openCurrent:motion.closeCurrent));
-    TIC(setMaxAccel(home?motion.homingAccel:opening?motion.openAccel:motion.closeAccel));
-    TIC(setMaxDecel(home?motion.homingDecel:opening?motion.openDecel:motion.closeDecel));
+    TIC(setCurrentLimit(settings.current));
+    TIC(setMaxAccel(settings.acceleration));
+    TIC(setMaxDecel(settings.deceleration));
     TIC(haltAndSetPosition(home?0:position));
-    if(home) { TIC(setTargetVelocity(-static_cast<int32_t>(motion.homingSpeed))); }
+    if(home) { TIC(setTargetVelocity(-static_cast<int32_t>(settings.speed))); }
     else {
-      TIC(setMaxSpeed(opening?(action==MotorAction::Reopen?motion.reopenSpeed:motion.openSpeed):motion.closeSpeed));
+      TIC(setMaxSpeed(settings.speed));
       TIC(setTargetPosition(opening?motion.travel:0));
     }
     TIC(energize());TIC(exitSafeStart()); return ok;
@@ -167,6 +167,9 @@ void control(void *) {
     if(output.forced) {DoorEvent e{static_cast<uint8_t>(kForcedEvent),now};if(!liveReady || xQueueSend(events,&e,0)!=pdTRUE)++losses;}
     if(!mcpHealthy) upButton=downButton=false;
     DoorStatus s{};s.state=machine.state();s.homed=machine.homed();s.limit=input.limit;s.beam=input.beam;
+    s.openingRetries=machine.openingRetries();s.openingRetryLimit=motion.openRetryLimit;
+    s.openingRetryPaused=machine.retryPaused();s.openingRetryActive=machine.retryActive();
+    s.closedCueEligible=machine.closedCueEligible();s.openingThreshold=machine.openingThreshold();
     s.mcpHealthy=mcpHealthy;s.upButton=upButton;s.downButton=downButton;
     s.energized=input.energized;s.healthy=input.ticHealthy;s.maintenance=reserved;s.upOutput=up;s.downOutput=down;
     s.encoderPosition=input.encoderPosition;s.encoderCounts=counts;s.motorPosition=input.motorPosition;s.targetPosition=input.targetPosition;
