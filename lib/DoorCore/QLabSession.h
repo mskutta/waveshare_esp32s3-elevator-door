@@ -12,6 +12,8 @@ public:
   QLabStage stage() const {return stage_;}
   const char *method() const {return method_;}
   bool startCue(const char *cue,uint32_t generation,uint32_t now);
+  // The envelope identifies the sent method; QLab may expand the JSON method.
+  bool matchesReply(const char *invokedMethod,const char *replyMethod,const char *workspace) const;
   // Returns the closed-slot generation acknowledged, or zero for other replies.
   uint32_t reply(const char *address,const char *workspace,const char *status,const char *dataText,bool repliesEnabled,uint32_t now);
 private:

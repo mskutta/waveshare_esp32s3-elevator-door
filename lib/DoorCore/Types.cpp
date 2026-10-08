@@ -12,7 +12,7 @@ AppConfig defaultConfig(bool rear) {
   AppConfig c{};
   c.motion = {18600, rear ? 20000000u : 90000000u, 90000000, 30000000, 10000000,
     400000, 700000, 100000, 100000, 100000, 100000, 1500, 900, 1500,
-    rear ? 5000u : 600000u, 2000, 250, 30000, 30000, 5000, 64, 128, 2, 3, 1000, 128};
+    rear ? 5000u : 600000u, 2000, 250, 30000, 30000, 5000, 64, 128, 10, 3, 1000, 128};
   c.qlab.port = 53000; c.qlab.closedExpiryMs = 30000;
   return c;
 }
@@ -52,7 +52,7 @@ bool validateConfig(const AppConfig &c, const char *&error) {
   if (m.settleMs > 5000) return false;
   for (auto v : {m.openTimeoutMs, m.closeTimeoutMs, m.homingTimeoutMs}) if (v < 100 || v > 600000) return false;
   error = "invalid opening retry/completion settings";
-  if(m.openRetryLimit>3 || m.openRetryDivisor<1 || m.openRetryDivisor>10 ||
+  if(m.openRetryLimit>10 || m.openRetryDivisor<1 || m.openRetryDivisor>10 ||
      m.openRetryPauseMs<100 || m.openRetryPauseMs>5000 ||
      m.openCompletionTolerance<1 || m.openCompletionTolerance>m.travel/20) return false;
   if(m.openRetryLimit && (m.openSpeed/m.openRetryDivisor<10000 ||
@@ -72,7 +72,7 @@ bool validateConfig(const AppConfig &c, const char *&error) {
   error = "invalid QLab settings";
   if (!c.qlab.port || c.qlab.closedExpiryMs < 100 || c.qlab.closedExpiryMs > 3600000) return false;
   if (c.qlab.enabled && !c.qlab.host[0]) {error="QLab host is required when cue triggers are enabled";return false;}
-  if (c.qlab.enabled && !segment(c.qlab.workspace,true)) {error="QLab workspace ID is required when cue triggers are enabled; copy the unique ID from QLab Workspace Status > Info";return false;}
+  if (c.qlab.workspace[0] && !segment(c.qlab.workspace,true)) {error="Invalid QLab workspace ID; copy the unique ID from QLab Workspace Status > Info or leave blank for all listening workspaces";return false;}
   for (const char *p=c.qlab.host; *p; ++p) if (!( (*p>='a'&&*p<='z') || (*p>='A'&&*p<='Z') || (*p>='0'&&*p<='9') || *p=='.' || *p=='-')) return false;
   for (auto &mapping : c.qlab.events) if (mapping.enabled && !segment(mapping.cue)) return false;
   error = nullptr; return true;

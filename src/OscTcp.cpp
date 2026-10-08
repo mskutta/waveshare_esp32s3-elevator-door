@@ -52,10 +52,10 @@ void receiveReply(const uint8_t *data,size_t n) {
   JsonDocument json;
   if(deserializeJson(json,view.argument) || !json["address"].is<const char*>() || !json["status"].is<const char*>()) {++status.rejected;return;}
   const char *method=json["address"];
-  // Both the OSC envelope and JSON must identify the invoked method.
-  if(strcmp(view.address+6,method)) {++status.rejected;return;}
+  const char *workspace=json["workspace_id"]|"";
+  if(!session.matchesReply(view.address+6,method,workspace)) {++status.rejected;return;}
   QLabStage previous=session.stage();
-  uint32_t generation=session.reply(method,json["workspace_id"]|"",json["status"],json["data"].is<const char*>()?json["data"].as<const char*>():nullptr,
+  uint32_t generation=session.reply(method,workspace,json["status"],json["data"].is<const char*>()?json["data"].as<const char*>():nullptr,
     (json["data"].is<bool>() && json["data"].as<bool>()) ||
     (json["data"].is<int>() && json["data"].as<int>()!=0),millis());
   if(session.stage()==QLabStage::Failed) {error("QLab denied/error/badpass");closeOutput(30000);return;}

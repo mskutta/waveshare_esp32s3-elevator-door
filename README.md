@@ -51,7 +51,7 @@ An open command opens from closed or reopens during closing. Repeated commands d
 
 Encoder A/B on GPIO48/47 use internal 3.3 V pull-ups for the initial hardware trial; retain the encoder’s 5 V supply and common ground. Validate counting under motor load at maximum configured speed, adding external 4.7 kΩ pull-ups to 3.3 V if needed. See [wiring](docs/WIRING.md) and [commissioning](docs/COMMISSIONING.md).
 
-An opening succeeds only after the closed switch releases and encoder position reaches travel minus completion tolerance (18,472 microsteps with defaults). A stalled or short opening gets up to two retries, each after a one-second motor-release pause, using one-third opening speed and acceleration. The Tic position is synchronized to the latest encoder measurement; the encoder is not reset. Opening and reopening share the cycle’s retry budget. Each opening episode, including its retry pauses, must finish within the opening deadline. Exhaustion faults and clears closed-cue eligibility. See [motion settings](docs/MOTION.md).
+An opening succeeds only after the closed switch releases and encoder position reaches travel minus completion tolerance (18,472 microsteps with defaults). A stalled or short opening gets up to ten retries by default, each after a one-second motor-release pause, using one-third opening speed and acceleration. The Tic position is synchronized to the latest encoder measurement; the encoder is not reset. Opening and reopening share the cycle’s retry budget. Each opening episode, including its retry pauses, must finish within the opening deadline. Exhaustion faults and clears closed-cue eligibility. See [motion settings](docs/MOTION.md).
 
 The configurable `beam_break` QLab event fires once per fresh obstruction only in `unknown` before the first closed-position confirmation after boot. It is suppressed during faults and permanently after initialization until reboot. An already-blocked beam must clear first; offline breaks are discarded.
 
@@ -66,7 +66,7 @@ Incoming TCP port **53000**, OSC 1.1 double-END SLIP framing, one argument-free 
 
 Two simultaneous incoming clients are supported. Frames are limited to 2048 bytes. An unfinished frame times out after two seconds. Unsupported addresses, arguments, bundles, invalid padding/escaping, and oversized frames are rejected. This is TCP OSC, not UDP or plain text, and not length-prefixed OSC 1.0.
 
-Outgoing QLab cue starts use a separate TCP connection, configured host/port (default 53000), workspace ID, and optional passcode. See [QLab setup and replay semantics](docs/QLAB.md).
+Outgoing QLab cue starts use a separate TCP connection, configured host/port (default 53000), optional workspace ID, and optional passcode. A blank workspace ID targets all open workspaces listening on that port. See [QLab setup and replay semantics](docs/QLAB.md).
 
 Only the **closed** trigger has one pending RAM slot. It is created only after an encoder-confirmed successful opening returns to the closed switch, coalesces repeated offers without refreshing its age, retries until QLab acknowledges it, and expires after 30 seconds by default. Faults, reopening, loss of closed confirmation, reboot, or a configuration commit cancel it. Partial/failed openings, startup, and fault recovery cannot advance the closed cue. Other enabled mappings are live-only, use a bounded 16-event buffer, expire after one second, and are discarded on disconnection; uncertain live sends are not retried. Disabled mappings do not start cues.
 

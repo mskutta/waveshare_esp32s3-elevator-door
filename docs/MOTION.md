@@ -15,7 +15,7 @@ Defaults are taken from the ESP8266 firmware, with opening acceleration restored
 - Opening/closing deadline: **30,000 ms** each. Homing deadline **5,000 ms**.
 - Closing drift threshold **64 microsteps**; opening drift threshold **128 microsteps**.
 - Opening completion tolerance **128 microsteps**: encoder threshold **18,472** at default travel.
-- Opening retry limit **2**, release pause **1,000 ms**, speed/acceleration divisor **3**.
+- Opening retry limit **10**, release pause **1,000 ms**, speed/acceleration divisor **3**.
 
 Tic speed units are **steps per 10,000 seconds**: 90,000,000 means 9,000 microsteps/s. Acceleration/deceleration units are **steps/s² × 100**: 300,000 means 3,000 microsteps/s². The step mode is fixed at 1/8.
 
@@ -23,7 +23,7 @@ Tic speed units are **steps per 10,000 seconds**: 90,000,000 means 9,000 microst
 
 Travel accepts 160–1,000,000 microsteps. Speeds accept 10,000–500,000,000; acceleration/deceleration accept 100–2,147,483,647. Current accepts 100–3,093 mA (the T500 protocol table limit, **not** assurance your motor/driver can thermally sustain it). Dwell accepts 100–3,600,000 ms; settle 0–5,000 ms; movement deadlines 100–600,000 ms. Drift thresholds must be positive and below travel. Opening/reopening/closing deadlines must exceed the ideal acceleration/cruise/deceleration time for the configured travel.
 
-Retry limit accepts 0–3 additional attempts, pause 100–5,000 ms, and divisor 1–10. Completion tolerance must be positive and at most 5% of travel. Enabled retries must retain valid Tic speed and acceleration after division. The deadline need not accommodate all possible retries: pauses and remaining motion consume the same deadline, and timeout takes priority.
+Retry limit accepts 0–10 additional attempts, pause 100–5,000 ms, and divisor 1–10. Completion tolerance must be positive and at most 5% of travel. Enabled retries must retain valid Tic speed and acceleration after division. The deadline need not accommodate all possible retries: pauses and remaining motion consume the same deadline, and timeout takes priority.
 
 The fixed encoder and microstep conversion is not editable. Tune only while physically closed, homed, with a healthy Tic and released motor. The motor task reserves that state before saving; it ignores open requests during the reservation, rechecks state before committing motion changes, and applies new values to the next movement. Settings use versioned JSON in NVS namespaces `door-front` and `door-rear`; invalid/corrupt/unsupported saved data falls back to that build's defaults. Saved versions 1 and 2 migrate in memory to version 4, retaining validated motion/QLab values and adding retry defaults. Version-1 network settings are discarded; Ethernet always uses DHCP. For legacy travel below 2,560 microsteps, tolerance is reduced to 5% of travel; the divisor is reduced where needed to keep existing low speed/acceleration valid. Saved versions 1–3 additionally gain a disabled `beam_break` mapping while retaining existing settings. The next save writes schema version 4. Other unknown schema versions are not migrated.
 

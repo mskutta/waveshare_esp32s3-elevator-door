@@ -145,6 +145,7 @@ static void openingRetryTests() {
   };
   for(bool rear:{false,true}) {
     auto m=defaultConfig(rear).motion;DoorInput i;
+    assert(m.openRetryLimit==10);
     for(auto action:{MotorAction::RetryOpen,MotorAction::RetryReopen}) {
       auto settings=motorSettings(m,action);
       assert(settings.opening&&!settings.homing&&settings.current==m.openCurrent&&settings.deceleration==m.openDecel);
@@ -178,9 +179,9 @@ static void openingRetryTests() {
     ClosedTrigger pending;if(out.closedCycle)pending.offer(i.now);assert(pending.pending());
 
     // A Tic that reports target reached at a short encoder distance is retried,
-    // then faults after exactly two retries. A held closed switch cannot qualify.
+    // then faults after exactly ten retries. A held closed switch cannot qualify.
     DoorMachine failed(m,rear);start(failed,i,m);i.limit=true;i.motorPosition=i.targetPosition=m.travel;i.encoderPosition=10;
-    for(unsigned retry=1;retry<=2;++retry) {
+    for(unsigned retry=1;retry<=10;++retry) {
       ++i.now;out=failed.tick(i,true);assert(out.motor==MotorAction::Release&&failed.retryPaused());
       assert(failed.openingRetries()==retry&&!failed.closedCueEligible());
       i.now+=m.openRetryPauseMs;assert(failed.tick(i,true).motor==MotorAction::RetryOpen);
@@ -208,8 +209,11 @@ static void openingRetryTests() {
     assert(shared.tick(i).motor==MotorAction::Release&&shared.state()==DoorState::Reopen);
     i.now+=m.settleMs;assert(shared.tick(i).motor==MotorAction::Reopen);
     i.targetPosition=m.travel;i.motorPosition=1500;i.encoderPosition=1000;++i.now;
-    assert(shared.tick(i,true).motor==MotorAction::Release&&shared.openingRetries()==2);
-    i.now+=m.openRetryPauseMs;assert(shared.tick(i,true).motor==MotorAction::RetryReopen);
+    for(unsigned retry=2;retry<=10;++retry) {
+      assert(shared.tick(i,true).motor==MotorAction::Release&&shared.openingRetries()==retry);
+      i.now+=m.openRetryPauseMs;assert(shared.tick(i,true).motor==MotorAction::RetryReopen);
+      ++i.now;
+    }
     ++i.now;assert(shared.tick(i,true).motor==MotorAction::Release&&shared.state()==DoorState::Fault);
     assert(!shared.closedCueEligible());
   }
@@ -256,6 +260,16 @@ static void configTests() {
     if(version==3)assert(decoded.motion.openRetryLimit==1&&decoded.motion.openRetryPauseMs==1500);
     configToJson(decoded,doc);assert(doc["version"]==4);
   }
+  // Current-schema saved retry limits remain unchanged after loading.
+  for(bool rear:{false,true}) for(uint8_t limit:{0,2,3,10}) {
+    auto saved=defaultConfig(rear);saved.motion.openRetryLimit=limit;
+    assert(validateConfig(saved,why));configToJson(saved,doc);
+    assert(configFromJson(doc.as<JsonVariantConst>(),decoded,error)&&decoded.motion.openRetryLimit==limit);
+    String stored;serializeJson(doc,stored);Preferences::storage[rear?"door-rear":"door-front"]["config"]=stored;
+    assert(configLoad(decoded,rear)&&decoded.motion.openRetryLimit==limit);
+  }
+  configToJson(c,doc);doc["motion"]["openRetryLimit"]=11;
+  assert(!configFromJson(doc.as<JsonVariantConst>(),decoded,error));
   Preferences::failWrite=true;assert(!configSave(c));Preferences::failWrite=false;
   Preferences::storage["door-front"]["config"]="{invalid";assert(!configLoad(decoded,false));assert(decoded.motion.travel==18600);
   doc["version"]=99;assert(!configFromJson(doc.as<JsonVariantConst>(),decoded,error));doc["version"]=kConfigVersion;
@@ -278,7 +292,7 @@ static void configTests() {
     assert(configLoad(decoded,rear)&&sameMotion(decoded.motion,old.motion));
     assert(decoded.qlab.enabled&&!strcmp(decoded.qlab.passcode,"saved-passcode")&&
       !strcmp(decoded.qlab.workspace,"saved-workspace")&&decoded.qlab.events[3].enabled&&!strcmp(decoded.qlab.events[3].cue,"42"));
-    assert(decoded.motion.openRetryLimit==2&&decoded.motion.openRetryDivisor==3&&decoded.motion.openRetryPauseMs==1000&&decoded.motion.openCompletionTolerance==128);
+    assert(decoded.motion.openRetryLimit==10&&decoded.motion.openRetryDivisor==3&&decoded.motion.openRetryPauseMs==1000&&decoded.motion.openCompletionTolerance==128);
     configToJson(decoded,doc);assert(doc["version"]==kConfigVersion&&doc["network"].isUnbound());
     // API only accepts the current schema, without network override fields.
     doc["network"]["dhcp"]=false;assert(!configFromJson(doc.as<JsonVariantConst>(),decoded,error));
@@ -288,7 +302,7 @@ static void configTests() {
   for(int bad=0;bad<8;++bad) {
     c=defaultConfig(false);
     switch(bad) {
-      case 0:c.motion.openRetryLimit=4;break;
+      case 0:c.motion.openRetryLimit=11;break;
       case 1:c.motion.openRetryDivisor=0;break;
       case 2:c.motion.openRetryDivisor=11;break;
       case 3:c.motion.openRetryPauseMs=99;break;
@@ -313,10 +327,16 @@ static void configTests() {
     for(const char *field:{"openRetryLimit","openRetryDivisor","openRetryPauseMs","openCompletionTolerance"})doc["motion"].remove(field);
     String stored;serializeJson(doc,stored);Preferences::storage["door-front"]["config"]=stored;
     assert(configLoad(decoded,false));assert(decoded.motion.travel==160&&decoded.motion.openAccel==100&&decoded.motion.openTimeoutMs==600000);
-    assert(decoded.motion.openCompletionTolerance==8&&decoded.motion.openRetryDivisor==1&&decoded.motion.openRetryLimit==2);
+    assert(decoded.motion.openCompletionTolerance==8&&decoded.motion.openRetryDivisor==1&&decoded.motion.openRetryLimit==10);
     assert(configSave(decoded));assert(configLoad(decoded,false)&&decoded.motion.openRetryDivisor==1);
   }
-  c=defaultConfig(false);c.qlab.enabled=true;strcpy(c.qlab.host,"127.0.0.1");assert(!validateConfig(c,why));assert(std::string(why).find("workspace ID is required")!=std::string::npos);
+  c=defaultConfig(false);c.qlab.enabled=true;strcpy(c.qlab.host,"127.0.0.1");assert(validateConfig(c,why));
+  configToJson(c,doc);assert(configFromJson(doc.as<JsonVariantConst>(),decoded,error)&&!decoded.qlab.workspace[0]);
+  assert(configSave(c)&&configLoad(decoded,false)&&decoded.qlab.enabled&&!decoded.qlab.workspace[0]);
+  for(const char *invalid:{"../go","with space","/workspace/abc","{abc}"}) {
+    strcpy(c.qlab.workspace,invalid);assert(!validateConfig(c,why));
+    c.qlab.enabled=false;assert(!validateConfig(c,why));c.qlab.enabled=true;
+  }
   strcpy(c.qlab.workspace,"abc-123");assert(validateConfig(c,why));c.qlab.events[3].enabled=true;strcpy(c.qlab.events[3].cue,"../go");assert(!validateConfig(c,why));
   std::cout<<"PASS JSON persistence, legacy DHCP/static migration retaining both door settings, static override rejection, validation\n";
 }
@@ -355,6 +375,61 @@ static void triggerTests() {
   s.reply("/alwaysReply","","ok",nullptr,false,2);assert(!s.ready());s.reply("/alwaysReply","","ok",nullptr,true,3);assert(s.ready());
   assert(s.startCue("closed",42,4));assert(!s.startCue("other",43,5));assert(s.reply(s.method(),"abc","ok",nullptr,false,6)==42);
   assert(s.ready());assert(s.startCue("closed",43,7));assert(s.expired(2007));s.disconnected();assert(!s.ready());
+  // Scoped replies must match both method and workspace when present.
+  s.connected(q,0);assert(!strcmp(s.method(),"/workspace/abc/connect"));
+  s.reply(s.method(),"wrong","ok","ok",false,1);assert(s.stage()==QLabStage::Authenticate);
+  s.reply(s.method(),"","ok","ok",false,2);assert(s.stage()==QLabStage::EnableReplies);
+  s.reply("/alwaysReply","","ok",nullptr,true,3);assert(s.startCue("closed",44,4));
+  assert(!strcmp(s.method(),"/workspace/abc/cue/closed/start"));
+  assert(s.reply(s.method(),"wrong","ok",nullptr,false,5)==0&&!s.ready());
+  assert(s.reply(s.method(),"abc","ok",nullptr,false,6)==44);
+  q.workspace[0]=0;
+  for(const char *workspace:{"","workspace-one","workspace-two"}) {
+    for(const char *failure:{"badpass","ok:view|edit"}) {
+      s.connected(q,0);assert(!strcmp(s.method(),"/connect"));
+      s.reply(s.method(),workspace,"ok",failure,false,1);assert(s.stage()==QLabStage::Failed);
+    }
+    s.connected(q,0);s.reply("/other",workspace,"ok","ok",false,1);assert(s.stage()==QLabStage::Authenticate);
+    s.reply(s.method(),workspace,"denied","ok",false,2);assert(s.stage()==QLabStage::Failed);
+    s.connected(q,0);s.reply(s.method(),workspace,"ok","ok:control",false,1);
+    assert(s.stage()==QLabStage::EnableReplies);
+    s.reply("/alwaysReply",workspace,"ok",nullptr,true,2);assert(s.ready());
+    assert(s.startCue("closed",45,3));assert(!strcmp(s.method(),"/cue/closed/start"));
+    assert(s.reply("/cue/wrong/start",workspace,"ok",nullptr,false,4)==0&&!s.ready());
+    assert(s.reply(s.method(),"different-workspace","ok",nullptr,false,5)==45&&s.ready());
+    assert(s.reply("/cue/closed/start",workspace,"ok",nullptr,false,6)==0); // duplicate reply
+    assert(s.startCue("closed",46,7));
+    assert(s.reply(s.method(),workspace,"error",nullptr,false,8)==0&&s.stage()==QLabStage::Failed);
+  }
+  // Reproduce QLab 5.6.3's unscoped envelope with a workspace-expanded JSON address.
+  const char *actualWorkspace="4942F22D-F79B-41B0-8375-294DF80FAB43";
+  String expandedConnect=String("/workspace/")+actualWorkspace+"/connect";
+  String expandedCue=String("/workspace/")+actualWorkspace+"/cue/1/start";
+  s.connected(q,0);
+  assert(s.matchesReply("/connect",expandedConnect.c_str(),actualWorkspace));
+  assert(!s.matchesReply("/other",expandedConnect.c_str(),actualWorkspace));
+  assert(!s.matchesReply("/connect",expandedConnect.c_str(),"wrong"));
+  assert(!s.matchesReply("/connect",expandedConnect.c_str(),""));
+  assert(!s.matchesReply("/connect","/workspace//connect",actualWorkspace));
+  assert(!s.matchesReply("/connect","/workspace/4942F22D-F79B-41B0-8375-294DF80FAB43/connect/extra",actualWorkspace));
+  assert(!s.matchesReply("/connect",expandedCue.c_str(),actualWorkspace));
+  s.reply(expandedConnect.c_str(),actualWorkspace,"ok","ok:view|edit|control",false,1);
+  assert(s.stage()==QLabStage::EnableReplies);
+  assert(!s.matchesReply("/alwaysReply","/workspace/4942F22D-F79B-41B0-8375-294DF80FAB43/alwaysReply",actualWorkspace));
+  s.reply("/alwaysReply","","ok",nullptr,true,2);assert(s.ready());
+  assert(s.startCue("1",47,3));
+  assert(s.matchesReply("/cue/1/start",expandedCue.c_str(),actualWorkspace));
+  assert(!s.matchesReply("/cue/1/start",expandedCue.c_str(),"wrong"));
+  assert(!s.matchesReply("/cue/1/start",expandedConnect.c_str(),actualWorkspace));
+  assert(s.reply(expandedCue.c_str(),actualWorkspace,"ok",nullptr,false,4)==47&&s.ready());
+  assert(s.reply(expandedCue.c_str(),actualWorkspace,"ok",nullptr,false,5)==0);
+  s.connected(q,0);s.reply(expandedConnect.c_str(),actualWorkspace,"denied","ok",false,1);
+  assert(s.stage()==QLabStage::Failed);
+  s.connected(q,0);s.reply(expandedConnect.c_str(),actualWorkspace,"ok","badpass",false,1);
+  assert(s.stage()==QLabStage::Failed);
+  strcpy(q.workspace,"abc");s.connected(q,0);
+  assert(!s.matchesReply("/connect",expandedConnect.c_str(),actualWorkspace));
+  assert(!s.matchesReply("/workspace/abc/connect",expandedConnect.c_str(),actualWorkspace));
   std::cout<<"PASS single closed slot, coalescing, expiry, stale acknowledgments, QLab authentication/replies\n";
 }
 static void httpParserTests() {
@@ -377,10 +452,11 @@ static std::vector<uint8_t> frame(const char *method,const char *arg=nullptr) {
 }
 static void sendAll(int fd,const std::vector<uint8_t> &data) {assert(send(fd,data.data(),data.size(),0)==static_cast<ssize_t>(data.size()));}
 static int connectLocal(uint16_t port) {int fd=socket(AF_INET,SOCK_STREAM,0);assert(fd>=0);sockaddr_in a{};a.sin_family=AF_INET;a.sin_addr.s_addr=htonl(INADDR_LOOPBACK);a.sin_port=htons(port);assert(connect(fd,reinterpret_cast<sockaddr*>(&a),sizeof(a))==0);return fd;}
-static void tcpIntegration() {
+static void tcpIntegration(bool scoped) {
+  fakeDoor={};ethOnline=true;opens=acknowledged=0;live.clear();
   int server=socket(AF_INET,SOCK_STREAM,0);assert(server>=0);sockaddr_in a{};a.sin_family=AF_INET;a.sin_addr.s_addr=htonl(INADDR_LOOPBACK);
   assert(bind(server,reinterpret_cast<sockaddr*>(&a),sizeof(a))==0 && listen(server,4)==0);socklen_t len=sizeof(a);assert(getsockname(server,reinterpret_cast<sockaddr*>(&a),&len)==0);
-  fcntl(server,F_SETFL,O_NONBLOCK);QLabConfig cfg{};cfg.enabled=true;strcpy(cfg.host,"127.0.0.1");strcpy(cfg.workspace,"workspace-123");strcpy(cfg.passcode,"secret");cfg.port=ntohs(a.sin_port);cfg.closedExpiryMs=30000;
+  fcntl(server,F_SETFL,O_NONBLOCK);QLabConfig cfg{};cfg.enabled=true;strcpy(cfg.host,"127.0.0.1");if(scoped)strcpy(cfg.workspace,"workspace-123");strcpy(cfg.passcode,"secret");cfg.port=ntohs(a.sin_port);cfg.closedExpiryMs=30000;
   cfg.events[3].enabled=true;strcpy(cfg.events[3].cue,"closed");cfg.events[9].enabled=true;strcpy(cfg.events[9].cue,"waiting");
   testMillis=0;oscBegin();oscConfigure(cfg);int peer=-1;SlipDecoder decoder;unsigned closedStarts=0,liveStarts=0,beamStarts=0,auth=0,boolReplies=0,intReplies=0;bool suppressAck=false,badpass=false;
   auto pump=[&] {
@@ -390,14 +466,36 @@ static void tcpIntegration() {
       for(int j=0;j<n;++j)if(size_t length=decoder.feed(buf[j])){
         // /alwaysReply 1 is an int message; the following read query verifies it.
         OscView v;if(!decodeOsc(decoder.data(),length,v))continue;
-        String method=v.address;JsonDocument reply;reply["address"]=method;reply["status"]="ok";
+        String method=v.address;
+        if(method!="/alwaysReply") assert(method==(scoped?"/workspace/workspace-123":"")+String(method.find("/connect")!=String::npos?"/connect":method.find("/closed/")!=String::npos?"/cue/closed/start":method.find("/beam/")!=String::npos?"/cue/beam/start":"/cue/waiting/start"));
+        JsonDocument reply;reply["address"]=method;reply["status"]="ok";
         if(method.find("/connect")!=String::npos){++auth;assert(v.argument&&!strcmp(v.argument,"secret"));reply["workspace_id"]="workspace-123";reply["data"]=badpass?"badpass":"ok:view|edit|control";}
         else if(method=="/alwaysReply") {
           if(auth%2) {reply["data"]=true;++boolReplies;}
           else {reply["data"]=1;++intReplies;}
         }
-        else if(method.find("/cue/")!=String::npos){reply["workspace_id"]="workspace-123";if(method.find("/closed/")!=String::npos){++closedStarts;if(suppressAck)continue;}else if(method=="/workspace/workspace-123/cue/beam/start") ++beamStarts;else ++liveStarts;}
-        String json;serializeJson(reply,json);auto bytes=frame(("/reply"+method).c_str(),json.c_str());
+        else if(method.find("/cue/")!=String::npos){reply["workspace_id"]="workspace-123";if(method.find("/closed/")!=String::npos){++closedStarts;if(suppressAck)continue;}else if(method.find("/cue/beam/start")!=String::npos) ++beamStarts;else ++liveStarts;}
+        if(!scoped && method!="/alwaysReply") {
+          const char *workspace="4942F22D-F79B-41B0-8375-294DF80FAB43";
+          reply["workspace_id"]=workspace;
+          reply["address"]=String("/workspace/")+workspace+method;
+          if(auth==1 && method=="/connect") {
+            // Neither a mismatched envelope, workspace ID, nor command may authenticate.
+            String invalid;serializeJson(reply,invalid);
+            sendAll(peer,frame("/reply/other",invalid.c_str()));
+            reply["workspace_id"]="wrong";invalid.clear();serializeJson(reply,invalid);
+            sendAll(peer,frame("/reply/connect",invalid.c_str()));
+            reply["workspace_id"]=workspace;reply["address"]=String("/workspace/")+workspace+"/other";
+            invalid.clear();serializeJson(reply,invalid);sendAll(peer,frame("/reply/connect",invalid.c_str()));
+            reply["address"]=String("/workspace/")+workspace+method;
+          }
+        }
+        String json;serializeJson(reply,json);
+        if(!scoped && method=="/connect" && !badpass) {
+          // Exact captured payload (including JSON slash escapes), paired with /reply/connect.
+          json=R"JSON({"status":"ok","data":"ok:view|edit|control","workspace_id":"4942F22D-F79B-41B0-8375-294DF80FAB43","address":"\/workspace\/4942F22D-F79B-41B0-8375-294DF80FAB43\/connect"})JSON";
+        }
+        auto bytes=frame(("/reply"+method).c_str(),json.c_str());
         // Deliberately fragment replies over successive sends.
         assert(send(peer,bytes.data(),3,0)==3);assert(send(peer,bytes.data()+3,bytes.size()-3,0)==static_cast<ssize_t>(bytes.size()-3));
       }
@@ -405,7 +503,9 @@ static void tcpIntegration() {
     usleep(1000);
   };
   auto until=[&](auto condition,int limit=2000){for(int i=0;i<limit&&!condition();++i)pump();assert(condition());};
+  unsigned rejectedBefore=oscStatus().rejected;
   until([]{return oscStatus().ready;});assert(auth==1);
+  assert(oscStatus().rejected==rejectedBefore+(scoped?0:3));
   assert(oscTestListenPort()!=0);
   int command=connectLocal(oscTestListenPort());auto open=frame("/elev-door-front/door/open");
   assert(send(command,open.data(),4,0)==4);pump();assert(opens==0);assert(send(command,open.data()+4,open.size()-4,0)==static_cast<ssize_t>(open.size()-4));
@@ -513,4 +613,4 @@ static void mcpTests() {
   }
   std::cout<<"PASS MCP23008 safe startup, both door mappings/polarities, button inputs, NACK/short-read failure and recovery\n";
 }
-int main(){mcpTests();stateTests();beamBreakTests();openingRetryTests();configTests();codecTests();triggerTests();httpParserTests();tcpIntegration();webIntegration();std::cout<<"All native tests passed.\n";}
+int main(){mcpTests();stateTests();beamBreakTests();openingRetryTests();configTests();codecTests();triggerTests();httpParserTests();tcpIntegration(true);tcpIntegration(false);webIntegration();std::cout<<"All native tests passed.\n";}
