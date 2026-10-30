@@ -7,14 +7,16 @@ class HttpRequest {
 public:
   HttpResult feed(uint8_t);
   void reset();
-  const char *method() const {return method_;}
-  const char *path() const {return path_;}
-  const char *body() const {return buffer_+headerSize_;}
-  size_t bodySize() const {return contentLength_;}
+  const char *method() const { return method_; }
+  const char *path() const { return path_; }
+  const char *body() const { return buffer_ + headerSize_; }
+  bool upload() const { return upload_; }
+  size_t bodySize() const { return contentLength_; }
+
 private:
-  char buffer_[2048+8192+1]{},method_[8]{},path_[64]{};
-  size_t used_=0,headerSize_=0,contentLength_=0;
-  bool parsed_=false;
-  HttpResult result_=HttpResult::More;
+  char buffer_[2048 + 8192 + 1]{}, method_[8]{}, path_[64]{};
+  size_t used_ = 0, headerSize_ = 0, contentLength_ = 0;
+  bool parsed_ = false, upload_ = false;
+  HttpResult result_ = HttpResult::More;
   HttpResult parseHeaders();
 };

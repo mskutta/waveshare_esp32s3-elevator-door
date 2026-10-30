@@ -3,11 +3,13 @@
 DoorOutput DoorMachine::fault(const char *reason) {
   DoorOutput o; o.motor = MotorAction::Release; o.changed = state_ != DoorState::Fault;
   state_ = DoorState::Fault; fault_ = reason; homed_ = false; cycle_ = qualified_ = false;
+  autoOpenArmed_ = autoOpenEnabled_;
   retryPaused_ = retryActive_ = false; return o;
 }
-DoorOutput DoorMachine::tick(const DoorInput &i, bool open, bool reset) {
+DoorOutput DoorMachine::tick(const DoorInput &i, bool open, bool reset, bool allowAutomaticOpen) {
   DoorOutput o;
   if (!i.ticHealthy) return state_ == DoorState::Fault ? o : fault("Tic communication");
+  if (updating_) return o; // Upload holds motion/reset inhibited until explicitly released.
   if (state_ == DoorState::Fault) {
     if (!reset || i.energized) return o;
     fault_ = ""; lastLimit_ = false; enter(DoorState::Unknown, i.now, o);
@@ -24,16 +26,18 @@ DoorOutput DoorMachine::tick(const DoorInput &i, bool open, bool reset) {
     homed_ = true; enter(DoorState::Closed, i.now, o); return o;
   }
   if (!homed_) return o;
-  if (state_ == DoorState::Closed && !i.limit) {
-    homed_ = false; cycle_ = qualified_ = false; enter(DoorState::Unknown, i.now, o); return o;
-  }
+  // Closed is the homed idle state. A released switch can mean manual movement;
+  // the continuously running encoder still retains the position reference.
   const bool stopped = i.motorPosition == i.targetPosition;
   const int64_t drift = int64_t(i.motorPosition) - i.encoderPosition;
   auto wait = [&](uint32_t ms) { o.motor = MotorAction::Release; retryPaused_ = retryActive_ = false; dwell_ = ms; enter(DoorState::Waiting, i.now, o); };
   auto prepare = [&](bool reopen) { o.motor = MotorAction::Release; enter(reopen ? DoorState::Reopen : DoorState::Open,i.now,o); };
   switch (state_) {
     case DoorState::Closed:
-      if (open) { cycle_ = true; qualified_ = false;retries_ = 0;retryPaused_ = retryActive_ = false;prepare(false); }
+      if (open || (autoOpenArmed_ && allowAutomaticOpen)) {
+        autoOpenArmed_ = false;
+        cycle_ = true; qualified_ = false;retries_ = 0;retryPaused_ = retryActive_ = false;prepare(false);
+      }
       break;
     case DoorState::Open: case DoorState::Reopen:
       if (elapsed(i.now,entered_) >= motion_.settleMs) {

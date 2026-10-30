@@ -11,11 +11,14 @@
 #include "Ethernet.h"
 #include "WebUI.h"
 #include <Preferences.h>
+#include <Update.h>
 #include <cassert>
 #include <iostream>
 #include <vector>
 #include <deque>
 #include <random>
+#include <limits>
+#include <cmath>
 #include <sys/socket.h>
 #include <arpa/inet.h>
 #include <fcntl.h>
@@ -27,6 +30,8 @@ static bool ethOnline=true;
 static uint32_t opens=0,acknowledged=0;
 static std::deque<DoorEvent> live;
 static bool reserveAllowed=true,commitAllowed=true,reserved=false;
+static bool updateAllowed=true,updateHeld=false;
+static unsigned updateBegins=0,updateEnds=0;
 static unsigned resetRequests=0;
 DoorStatus doorStatus(){return fakeDoor;}
 void doorOpenRequest(){++opens;}
@@ -40,6 +45,8 @@ void doorResetFault(){++resetRequests;}
 bool doorReserve(bool changing){reserved=reserveAllowed&&(!changing||fakeDoor.state==DoorState::Closed);return reserved;}
 bool doorCommit(const MotionConfig &,uint32_t){if(!commitAllowed)return false;reserved=false;return true;}
 void doorReleaseReservation(){reserved=false;}
+bool doorBeginUpdate(){++updateBegins;updateHeld=true;return updateAllowed;}
+void doorEndUpdate(){++updateEnds;updateHeld=false;}
 
 static DoorInput input(uint32_t now=0){return {now,false,false,true,false,0,0,0};}
 static void beamBreakTests() {
@@ -60,8 +67,8 @@ static void beamBreakTests() {
     assert(!tick());i.beam=false;assert(!tick());i.beam=true;assert(tick());
     i.beam=false;assert(!tick());i.limit=true;i.beam=true;
     assert(!tick()&&door.homed()); // simultaneous break/initialization
-    i.limit=false;i.beam=false;assert(!tick()&&!door.homed());
-    i.beam=true;assert(!tick()); // latch survives position loss
+    i.limit=false;i.beam=false;assert(!tick()&&door.homed());
+    i.beam=true;assert(!tick()); // manual movement retains homing
     door.fault("hardware");i.beam=false;assert(!tick());
     assert(!tick(true));i.beam=true;assert(!tick()); // and fault reset
     BeamBreakTrigger reboot;
@@ -69,6 +76,82 @@ static void beamBreakTests() {
     assert(reboot.observe(true,DoorState::Unknown,false));
   }
   std::cout<<"PASS beam edges, startup baseline, faults/reset, initialization latch and reboot\n";
+}
+static void homingMemoryTests() {
+  for(bool rear:{false,true}) for(bool closedAtBoot:{false,true}) {
+    auto m=defaultConfig(rear).motion;
+    DoorMachine door(m,rear);auto i=input();i.limit=closedAtBoot;
+    auto o=door.tick(i,true);
+    if(!closedAtBoot) {
+      assert(!door.homed()&&o.motor==MotorAction::None&&!o.zeroEncoder);
+      i.encoderPosition=1200;++i.now;door.tick(i,true);
+      assert(door.state()==DoorState::Unknown);
+      i.limit=true;++i.now;o=door.tick(i);
+    }
+    assert(o.zeroEncoder&&!o.closedCycle&&o.motor==MotorAction::Release);
+    assert(door.homed()&&door.state()==DoorState::Closed);
+    i.encoderPosition=0;
+    // A maintenance reservation defers the automatic request without losing it.
+    for(int n=0;n<3;++n) {
+      i.now+=m.settleMs;o=door.tick(i,false,false,false);
+      assert(door.state()==DoorState::Closed&&o.motor==MotorAction::None&&!o.changed);
+    }
+    ++i.now;o=door.tick(i);
+    if(rear) {
+      assert(door.state()==DoorState::Closed&&o.motor==MotorAction::None);
+      o=door.tick(i,true);
+    }
+    assert(door.state()==DoorState::Open&&o.changed&&!o.zeroEncoder);
+    assert(o.motor==MotorAction::Release&&!o.closedCycle);
+    assert(!strcmp(eventName(static_cast<size_t>(door.state())),"open"));
+    ++i.now;o=door.tick(i,true);assert(!o.changed&&o.motor==MotorAction::None);
+    i.now+=m.settleMs;o=door.tick(i,true);
+    assert(o.changed&&o.motor==MotorAction::Open&&door.state()==DoorState::Opening);
+    assert(!strcmp(eventName(static_cast<size_t>(door.state())),"opening"));
+    i.limit=false;i.encoderPosition=i.motorPosition=i.targetPosition=m.travel;
+    ++i.now;o=door.tick(i);assert(door.state()==DoorState::Waiting&&door.closedCueEligible());
+    i.now+=m.dwellMs;door.tick(i);i.now+=m.settleMs;door.tick(i);
+    i.encoderPosition=i.motorPosition=i.targetPosition=0;++i.now;door.tick(i);
+    i.limit=true;++i.now;o=door.tick(i);assert(o.zeroEncoder&&o.closedCycle);
+    ++i.now;o=door.tick(i);assert(door.state()==DoorState::Closed&&o.motor==MotorAction::None);
+
+    // Manual movement retains the origin and stays idle even past normal dwell.
+    i.limit=false;i.encoderPosition=1200;i.now+=m.dwellMs+1;o=door.tick(i);
+    assert(door.homed()&&door.state()==DoorState::Closed&&!o.zeroEncoder);
+    assert(o.motor==MotorAction::None&&!o.changed&&!o.closedCycle&&!door.closedCueEligible());
+    assert(!door.canTune(i)&&!door.canMaintain(i));
+    i.encoderPosition=2400;++i.now;o=door.tick(i);
+    assert(door.homed()&&!o.zeroEncoder&&o.motor==MotorAction::None);
+    i.limit=true;i.encoderPosition=0;++i.now;o=door.tick(i);
+    assert(o.zeroEncoder&&!o.closedCycle&&door.homed());
+    ++i.now;o=door.tick(i);assert(o.motor==MotorAction::None); // no repeat auto-open
+    i.limit=false;i.encoderPosition=1700;++i.now;o=door.tick(i,true);
+    assert(door.state()==DoorState::Open&&o.motor==MotorAction::Release&&!o.zeroEncoder);
+    i.now+=m.settleMs;o=door.tick(i);
+    assert(o.motor==MotorAction::Open&&!o.zeroEncoder&&i.encoderPosition==1700);
+    i.encoderPosition=i.motorPosition=i.targetPosition=m.travel;++i.now;door.tick(i);
+    assert(door.state()==DoorState::Waiting&&door.closedCueEligible());
+
+    door.fault("test fault");assert(!door.homed());
+    ++i.now;o=door.tick(i,true);assert(door.state()==DoorState::Fault&&o.motor==MotorAction::None);
+    i.energized=true;door.tick(i,false,true);assert(door.state()==DoorState::Fault);
+    i.energized=false;++i.now;door.tick(i,false,true);
+    assert(!door.homed()&&door.state()==DoorState::Unknown);
+    ++i.now;door.tick(i,true);assert(door.state()==DoorState::Unknown);
+    i.limit=true;++i.now;o=door.tick(i);assert(o.zeroEncoder&&!o.closedCycle);
+    i.encoderPosition=0;++i.now;o=door.tick(i);
+    assert(door.state()==(rear?DoorState::Closed:DoorState::Open));
+    assert(o.motor==(rear?MotorAction::None:MotorAction::Release));
+    DoorMachine reboot(m,rear);i.limit=false;
+    assert(reboot.tick(i,true).motor==MotorAction::None&&!reboot.homed());
+  }
+  // Reset while already on the switch still separates zeroing from auto-opening.
+  DoorMachine front(defaultConfig(false).motion,false);auto i=input();i.limit=true;
+  front.tick(i);front.fault("test fault");
+  auto o=front.tick(i,true,true);assert(o.zeroEncoder&&front.state()==DoorState::Closed);
+  o=front.tick(i,true);assert(o.changed&&front.state()==DoorState::Open);
+  o=front.tick(i,true);assert(!o.changed&&o.motor==MotorAction::None);
+  std::cout<<"PASS homing memory, manual movement, first-home/recovery auto-open, rear isolation, maintenance deferral and normal events\n";
 }
 static void stateTests() {
   for(bool rear:{false,true}) {
@@ -97,7 +180,7 @@ static void stateTests() {
     i.now+=c.motion.shortDwellMs;door.tick(i);i.now+=c.motion.settleMs;door.tick(i);
     i.motorPosition=i.encoderPosition=i.targetPosition=0;i.now+=5;o=door.tick(i);assert(o.motor==MotorAction::Home);
     i.limit=true;i.now+=5;o=door.tick(i);assert(o.closedCycle && o.zeroEncoder && door.state()==DoorState::Closed);
-    i.limit=false;i.now+=5;door.tick(i);assert(door.state()==DoorState::Unknown && !door.homed());
+    i.limit=false;i.now+=5;door.tick(i);assert(door.state()==DoorState::Closed && door.homed());
     i.limit=true;i.now+=5;assert(!door.tick(i).closedCycle);
   }
   auto c=defaultConfig(false);DoorMachine door(c.motion,false);auto i=input();i.limit=true;door.tick(i);
@@ -239,6 +322,42 @@ static void configTests() {
   assert(configFromJson(doc.as<JsonVariantConst>(),decoded,error));assert(sameMotion(c.motion,decoded.motion));
   assert(!configLoad(decoded,false));assert(configSave(c));assert(configLoad(decoded,false));
   assert(sameMotion(decoded.motion,c.motion));assert(!configLoad(decoded,true));assert(decoded.motion.dwellMs==5000);
+  // Decimal divisors survive JSON/NVS and scale both opening retry paths.
+  for(float divisor:{1.0f,1.33f,1.3333f,2.5f,10.0f}) {
+    auto decimal=defaultConfig(true);decimal.motion.openRetryDivisor=divisor;
+    assert(validateConfig(decimal,why));configToJson(decimal,doc);
+    assert(configFromJson(doc.as<JsonVariantConst>(),decoded,error));
+    assert(sameMotion(decimal.motion,decoded.motion));
+    assert(configSave(decimal)&&configLoad(decoded,false));
+    // JSON text conversion can change the last binary floating-point bit.
+    assert(std::abs(decoded.motion.openRetryDivisor-divisor)<1e-6);
+    decimal.motion.openRetryDivisor=decoded.motion.openRetryDivisor;
+    assert(sameMotion(decimal.motion,decoded.motion));
+    for(auto action:{MotorAction::RetryOpen,MotorAction::RetryReopen}) {
+      auto settings=motorSettings(decoded.motion,action);
+      uint32_t speed=action==MotorAction::RetryOpen?20000000:90000000;
+      double savedDivisor=decoded.motion.openRetryDivisor;
+      assert(settings.speed==static_cast<uint32_t>(speed/savedDivisor));
+      assert(settings.acceleration==static_cast<uint32_t>(400000/savedDivisor));
+      assert(settings.deceleration==700000&&settings.current==1500);
+    }
+    assert(motorSettings(decoded.motion,MotorAction::Open).speed==decimal.motion.openSpeed);
+    assert(motorSettings(decoded.motion,MotorAction::Reopen).speed==decimal.motion.reopenSpeed);
+  }
+  for(double divisor:{0.99,10.01,std::numeric_limits<double>::infinity(),std::numeric_limits<double>::quiet_NaN()}) {
+    auto invalid=c;invalid.motion.openRetryDivisor=divisor;
+    assert(!validateConfig(invalid,why));
+  }
+  for(const char *value:{"1.33","invalid"}) {
+    configToJson(c,doc);doc["motion"]["openRetryDivisor"]=value;
+    assert(!configFromJson(doc.as<JsonVariantConst>(),decoded,error));
+  }
+  configToJson(c,doc);doc["motion"]["openRetryDivisor"]=true;
+  assert(!configFromJson(doc.as<JsonVariantConst>(),decoded,error));
+  // A fractional divisor must not bypass the Tic's minimum acceleration.
+  auto slow=c;slow.motion.openAccel=132;slow.motion.openRetryDivisor=1.33;
+  slow.motion.openTimeoutMs=600000;assert(!validateConfig(slow,why));
+  slow.motion.openAccel=134;assert(validateConfig(slow,why));
   assert(kForcedEvent==11&&kBeamBreakEvent==12&&!strcmp(eventName(kBeamBreakEvent),"beam_break"));
   assert(!c.qlab.events[kBeamBreakEvent].enabled&&!c.qlab.events[kBeamBreakEvent].cue[0]);
   c.qlab.events[kBeamBreakEvent].enabled=true;strcpy(c.qlab.events[kBeamBreakEvent].cue,"beam.1");
@@ -444,6 +563,17 @@ static void httpParserTests() {
   assert(feed("PUT /api/config HTTP/1.1\r\nTransfer-Encoding: chunked\r\n\r\n")==HttpResult::BadRequest);
   assert(feed("GET / HTTP/1.1\r\nX: "+String(2100,'a'))==HttpResult::TooLarge);
   assert(feed("PUT /api/config HTTP/1.1\r\nContent-Length: 3\r\nContent-Type: application/json\r\n\r\n{}")==HttpResult::More);
+  assert(feed("PUT /api/update HTTP/1.1\r\nContent-Length: 1000000\r\nContent-Type: application/octet-stream\r\n\r\n")==HttpResult::Ready);
+  assert(request.upload()&&request.bodySize()==1000000);
+  assert(feed("PUT /api/update HTTP/1.1\r\nContent-Length: 7340033\r\nContent-Type: application/octet-stream\r\n\r\n")==HttpResult::TooLarge);
+  assert(feed("PUT /api/update HTTP/1.1\r\nContent-Length: 9999999999999999999999\r\n\r\n")==HttpResult::TooLarge);
+  for(const String &headers:{String("Content-Length: 0\r\nContent-Type: application/octet-stream"),
+      String("Content-Length: 1\r\nContent-Type: application/json"),
+      String("Content-Type: application/octet-stream"),
+      String("Content-Length: 1\r\nContent-Length: 1\r\nContent-Type: application/octet-stream"),
+      String("Transfer-Encoding: chunked\r\nContent-Type: application/octet-stream")})
+    assert(feed("PUT /api/update HTTP/1.1\r\n"+headers+"\r\n\r\n")==HttpResult::BadRequest);
+  assert(feed("PUT /api/config HTTP/1.1\r\nContent-Length: 10000\r\nContent-Type: application/octet-stream\r\n\r\n")==HttpResult::TooLarge);
   std::cout<<"PASS bounded HTTP parsing, fragmented body, oversized headers/body, duplicate length and chunked rejection\n";
 }
 static std::vector<uint8_t> frame(const char *method,const char *arg=nullptr) {
@@ -587,6 +717,85 @@ static void webIntegration() {
   ethOnline=false;webLoop();
   std::cout<<"PASS real localhost HTTP page/API, settings guards, persistence rollback, invalid/oversized bodies, static-IP override rejection\n";
 }
+static void updateInterlockTests() {
+  for(bool rear:{false,true}) {
+    auto m=defaultConfig(rear).motion;
+    DoorMachine door(m,rear);auto i=input();i.limit=true;door.tick(i);
+    door.tick(i,true);i.now+=m.settleMs;door.tick(i);
+    auto o=door.beginUpdate();
+    assert(o.motor==MotorAction::Release&&door.updating()&&!door.homed());
+    assert(door.state()==DoorState::Fault&&!door.canMaintain(i));
+    for(uint32_t now:{100u,11000u,121000u}) {
+      i.now=now;o=door.tick(i,true,true);
+      assert(door.updating()&&door.state()==DoorState::Fault&&!o.zeroEncoder);
+      assert(o.motor==MotorAction::None&&!door.homed());
+    }
+    door.endUpdate();assert(!door.updating());
+    o=door.tick(i,true);assert(door.state()==DoorState::Fault&&!door.homed());
+    i.limit=false;door.tick(i,false,true);assert(door.state()==DoorState::Unknown);
+    i.limit=true;o=door.tick(i);assert(o.zeroEncoder&&door.homed()&&!o.closedCycle);
+    o=door.tick(i);assert(door.state()==(rear?DoorState::Closed:DoorState::Open));
+  }
+  std::cout<<"PASS firmware update interlock, no reservation expiry, reset suppression, explicit recovery and front rehoming\n";
+}
+static void webUpdateIntegration() {
+  AppConfig config=defaultConfig(false);webBegin(config);ethOnline=true;webLoop();
+  auto pump=[](){testMillis+=5;webLoop();usleep(500);};
+  auto start=[&](size_t length){
+    int fd=connectLocal(80);fcntl(fd,F_SETFL,O_NONBLOCK);
+    String wire="PUT /api/update HTTP/1.1\r\nContent-Type: application/octet-stream\r\nContent-Length: "+std::to_string(length)+"\r\n\r\n";
+    // Fragment headers to exercise the streaming handoff independently of payload.
+    for(size_t offset=0;offset<wire.size();offset+=7){
+      size_t count=std::min(size_t(7),wire.size()-offset);
+      assert(send(fd,wire.data()+offset,count,0)==static_cast<ssize_t>(count));pump();
+    }
+    for(int n=0;n<20;++n)pump();
+    return fd;
+  };
+  auto finish=[&](int fd){
+    String response;bool done=false;
+    for(int n=0;n<2000&&!done;++n){pump();char buffer[1024];int count=recv(fd,buffer,sizeof(buffer),0);
+      if(count>0)response.append(buffer,count);else if(count==0)done=true;
+    }
+    assert(done);close(fd);return response;
+  };
+  auto payload=[&](int fd,const std::vector<uint8_t> &bytes){
+    for(size_t offset=0;offset<bytes.size();offset+=251){
+      size_t count=std::min(size_t(251),bytes.size()-offset);
+      assert(send(fd,bytes.data()+offset,count,0)==static_cast<ssize_t>(count));pump();
+    }
+  };
+  unsigned ended=updateEnds;
+  updateAllowed=false;int fd=start(1024);
+  assert(finish(fd).find("409 Conflict")!=String::npos&&!updateHeld&&updateEnds==ended+1);
+  assert(Update.expected==0);updateAllowed=true;
+  Update.failBegin=true;fd=start(1024);
+  assert(finish(fd).find("400 Bad Request")!=String::npos&&!updateHeld);Update.failBegin=false;
+  Update.failWrite=true;fd=start(1024);payload(fd,std::vector<uint8_t>(10,0));
+  assert(finish(fd).find("400 Bad Request")!=String::npos&&Update.aborted&&!updateHeld);Update.failWrite=false;
+  Update.failEnd=true;
+  // Header terminator and binary NUL bytes can arrive in the same recv buffer.
+  fd=connectLocal(80);fcntl(fd,F_SETFL,O_NONBLOCK);
+  String combined="PUT /api/update HTTP/1.1\r\nContent-Type: application/octet-stream\r\nContent-Length: 10\r\n\r\n"+String(10,'\0');
+  assert(send(fd,combined.data(),combined.size(),0)==static_cast<ssize_t>(combined.size()));
+  assert(finish(fd).find("400 Bad Request")!=String::npos&&Update.aborted&&!updateHeld);Update.failEnd=false;
+  fd=start(1024);assert(updateHeld);close(fd);
+  for(int n=0;n<20;++n)pump();assert(Update.aborted&&!updateHeld);
+  fd=start(1024);assert(updateHeld);ethOnline=false;webLoop();close(fd);
+  assert(Update.aborted&&!updateHeld);ethOnline=true;webLoop();
+  fd=start(1024);assert(updateHeld);testMillis+=120001;webLoop();
+  assert(Update.aborted&&!updateHeld);close(fd);
+  assert(ESP.restarts==0); // Every failure leaves the running firmware in place.
+  fd=start(10000);assert(updateHeld&&Update.running);
+  testMillis+=11000;webLoop();assert(updateHeld&&Update.running); // no 10-second reservation expiry
+  String error;assert(!saveConfiguration(config,error));
+  std::vector<uint8_t> bytes(10000);for(size_t n=0;n<bytes.size();++n)bytes[n]=static_cast<uint8_t>(n);
+  payload(fd,bytes);auto response=finish(fd);
+  assert(response.find("200 OK")!=String::npos&&response.find("\"installed\":true")!=String::npos);
+  assert(Update.bytes==bytes&&!Update.aborted&&updateHeld&&ESP.restarts==0);
+  testMillis+=1001;webLoop();assert(ESP.restarts==1&&updateHeld);
+  std::cout<<"PASS streamed binary firmware, release refusal, flash errors, disconnect, link loss, timeout, configuration interlock and reboot\n";
+}
 static void mcpTests() {
   for(bool rear:{false,true}) {
     TwoWire bus;Mcp23008 mcp(bus,rear);assert(mcp.begin());
@@ -613,4 +822,4 @@ static void mcpTests() {
   }
   std::cout<<"PASS MCP23008 safe startup, both door mappings/polarities, button inputs, NACK/short-read failure and recovery\n";
 }
-int main(){mcpTests();stateTests();beamBreakTests();openingRetryTests();configTests();codecTests();triggerTests();httpParserTests();tcpIntegration(true);tcpIntegration(false);webIntegration();std::cout<<"All native tests passed.\n";}
+int main(){mcpTests();stateTests();homingMemoryTests();beamBreakTests();openingRetryTests();configTests();codecTests();triggerTests();httpParserTests();updateInterlockTests();tcpIntegration(true);tcpIntegration(false);webIntegration();webUpdateIntegration();std::cout<<"All native tests passed.\n";}

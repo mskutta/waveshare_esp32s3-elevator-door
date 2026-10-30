@@ -17,3 +17,6 @@ public:
   String toString() const {char out[24];snprintf(out,sizeof(out),"%u.%u.%u.%u",ip_&255,(ip_>>8)&255,(ip_>>16)&255,ip_>>24);return out;}
 private:uint32_t ip_;
 };
+
+struct EspStub { unsigned restarts=0; void restart(){++restarts;} };
+inline EspStub ESP;

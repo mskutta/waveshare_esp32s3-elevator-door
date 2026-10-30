@@ -17,7 +17,8 @@ struct MotionConfig {
   uint16_t openCurrent, closeCurrent, homingCurrent;
   uint32_t dwellMs, shortDwellMs, settleMs, openTimeoutMs, closeTimeoutMs, homingTimeoutMs;
   int32_t closeDrift, openDrift;
-  uint8_t openRetryLimit, openRetryDivisor;
+  uint8_t openRetryLimit;
+  float openRetryDivisor;
   uint32_t openRetryPauseMs;
   int32_t openCompletionTolerance;
 };

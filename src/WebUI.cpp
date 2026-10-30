@@ -1,4 +1,5 @@
 #include "WebUI.h"
+#include <Update.h>
 #include "WebPage.h"
 #include "Config.h"
 #include "DoorRuntime.h"
@@ -18,10 +19,18 @@ String responseBody;
 const char *body=nullptr;
 size_t bodyLength=0,bodyOffset=0,headerLength=0,headerOffset=0;
 char header[192];
-uint32_t clientAt=0;
-void closeClient(){if(client>=0)close(client);client=-1;body=nullptr;responseBody="";request.reset();}
+uint32_t clientAt=0,rebootAt=0;
+bool uploading=false,updateHeld=false,installed=false;
+size_t uploadRemaining=0;
+void closeClient(){
+  if(uploading){Update.abort();uploading=false;}
+  if(updateHeld && !installed){doorEndUpdate();updateHeld=false;}
+  if(client>=0)close(client);
+  client=-1;body=nullptr;responseBody="";request.reset();
+}
 bool nonblocking(int fd){return fcntl(fd,F_SETFL,fcntl(fd,F_GETFL,0)|O_NONBLOCK)==0;}
 void respond(int code,const char *type,const char *text) {
+  clientAt=millis(); // Give the response its own deadline after a long upload.
   body=text;bodyLength=strlen(text);bodyOffset=headerOffset=0;
   const char *reason=code==200?"OK":code==202?"Accepted":code==400?"Bad Request":code==404?"Not Found":code==409?"Conflict":code==413?"Content Too Large":"Error";
   headerLength=snprintf(header,sizeof(header),"HTTP/1.1 %d %s\r\nContent-Type: %s\r\nContent-Length: %u\r\nConnection: close\r\nCache-Control: no-store\r\n\r\n",code,reason,type,static_cast<unsigned>(bodyLength));
@@ -56,6 +65,12 @@ void dispatch() {
   if(!strcmp(method,"GET")&&!strcmp(path,"/"))respond(200,"text/html; charset=utf-8",kWebPage);
   else if(!strcmp(method,"GET")&&!strcmp(path,"/api/state"))state();
   else if(!strcmp(method,"GET")&&!strcmp(path,"/api/config")){JsonDocument doc;configToJson(*config,doc);jsonReply(200,doc);}
+  else if(request.upload()) {
+    updateHeld=true; // Also clean up a hold if its acknowledgment was lost.
+    if(!doorBeginUpdate()){failure(409,"Could not confirm motor release; firmware was not written");return;}
+    if(!Update.begin(request.bodySize(),U_FLASH)){failure(400,Update.errorString());return;}
+    uploading=true;uploadRemaining=request.bodySize();
+  }
   else if(!strcmp(method,"POST")&&!strcmp(path,"/api/door/open")){doorOpenRequest();respond(202,"application/json","{\"requested\":true}");}
   else if(!strcmp(method,"POST")&&!strcmp(path,"/api/fault/reset")){doorResetFault();respond(202,"application/json","{\"requested\":true}");}
   else if(!strcmp(method,"PUT")&&!strcmp(path,"/api/config")) {
@@ -75,6 +90,7 @@ void listenHTTP() {
 }
 }
 bool saveConfiguration(const AppConfig &next,String &error) {
+  if(updateHeld){error="Firmware update in progress";return false;}
   const char *why;
   if(!validateConfig(next,why)){error=why;return false;}
   bool changing=!sameMotion(config->motion,next.motion);
@@ -89,6 +105,11 @@ bool saveConfiguration(const AppConfig &next,String &error) {
 }
 void webBegin(AppConfig &c){config=&c;}
 void webLoop() {
+  if(installed){
+    if(static_cast<int32_t>(millis()-rebootAt)>=0){ESP.restart();return;}
+    // Finish the successful response, but accept no further requests before reboot.
+    if(client<0)return;
+  }
   if(!ethernetReady()) {
     closeClient();if(listener>=0){close(listener);listener=-1;}
     if(!ethernetReady())return;
@@ -99,12 +120,28 @@ void webLoop() {
     if(client>=0){if(!nonblocking(client)){closeClient();return;}clientAt=millis();request.reset();}
   }
   if(client>=0) {
-    if(elapsed(millis(),clientAt)>=5000){closeClient();}
+    if(elapsed(millis(),clientAt)>=(uploading?120000u:5000u)){closeClient();}
     else if(!body) {
       uint8_t buffer[512];int n=recv(client,buffer,sizeof(buffer),0);
       if(n==0||(n<0&&errno!=EAGAIN&&errno!=EWOULDBLOCK)){closeClient();}
-      for(int i=0;i<n&&client>=0;++i){auto result=request.feed(buffer[i]);
-        if(result==HttpResult::Ready){dispatch();break;}
+      for(int i=0;i<n&&client>=0;++i){
+        if(uploading){
+          size_t count=static_cast<size_t>(n-i);
+          if(count>uploadRemaining)count=uploadRemaining;
+          if(Update.write(buffer+i,count)!=count){
+            Update.abort();uploading=false;failure(400,"Firmware write failed; reset required before motion");break;
+          }
+          uploadRemaining-=count;i+=static_cast<int>(count)-1;
+          if(!uploadRemaining){
+            uploading=false;
+            if(!Update.end()){String error=Update.errorString();Update.abort();failure(400,error);}
+            else {installed=true;rebootAt=millis()+1000;respond(200,"application/json","{\"installed\":true,\"rebooting\":true}");}
+            break;
+          }
+          continue;
+        }
+        auto result=request.feed(buffer[i]);
+        if(result==HttpResult::Ready){dispatch();if(uploading)continue;break;}
         if(result!=HttpResult::More){failure(result==HttpResult::TooLarge?413:400,"Invalid or oversized HTTP request");break;}
       }
     } else {

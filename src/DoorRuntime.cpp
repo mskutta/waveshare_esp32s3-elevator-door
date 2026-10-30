@@ -15,7 +15,7 @@
 #include <limits.h>
 
 namespace {
-enum class RequestType { Reserve, Commit, Release };
+enum class RequestType { Reserve, Commit, Release, Update, EndUpdate };
 struct Request { RequestType type; uint32_t id; bool changingMotion; MotionConfig motion; uint32_t expiry; };
 struct Reply {uint32_t id; bool ok;};
 QueueHandle_t requests=nullptr,replies=nullptr,events=nullptr;
@@ -118,18 +118,27 @@ void control(void *) {
     if(xQueueReceive(requests,&r,0)==pdTRUE) {
       bool ok=true;
       if(r.type==RequestType::Reserve) {
-        ok=!reserved && machine.canMaintain(input) && (!r.changingMotion || (mcpHealthy && machine.canTune(input)));
+        ok=!reserved && !machine.updating() && machine.canMaintain(input) && (!r.changingMotion || (mcpHealthy && machine.canTune(input)));
         if(ok) {reserved=true;reservedAt=now;reservedChanging=r.changingMotion;}
       } else if(r.type==RequestType::Commit) {
-        ok=reserved && machine.canMaintain(input) && (!reservedChanging || (mcpHealthy && machine.canTune(input)));
+        ok=reserved && !machine.updating() && machine.canMaintain(input) && (!reservedChanging || (mcpHealthy && machine.canTune(input)));
         if(ok) {motion=r.motion;machine.tune(motion);expiry=r.expiry;closed.cancel();reserved=false;}
-      } else reserved=false;
+      } else if(r.type==RequestType::Update) {
+        reserved=false;
+        machine.beginUpdate();closed.cancel();xQueueReset(events);
+        // Confirm physical release before allowing flash writes. The fault/hold
+        // persists even if release fails or the request reply is lost.
+        ok=motor(MotorAction::Release,input.encoderPosition);
+        if(ok) {bool energized=tic.getEnergized();ok=tic.getLastError()==0 && !energized;}
+        commands=0;
+      } else if(r.type==RequestType::EndUpdate) {machine.endUpdate();commands=0;}
+      else reserved=false;
       Reply reply{r.id,ok};xQueueSend(replies,&reply,0);
     }
     DoorOutput output;
     if(!mcpHealthy) output=machine.state()==DoorState::Fault?DoorOutput{}:machine.fault("MCP23008 communication");
     else if(!encoderOK || !scaleOK) output=machine.fault(!encoderOK?"Encoder initialization":"Encoder range");
-    else output=machine.tick(input,commandsAllowed && !reserved && (commands&1),commandsAllowed && !reserved && (commands&2));
+    else output=machine.tick(input,commandsAllowed && !reserved && (commands&1),commandsAllowed && !reserved && (commands&2),commandsAllowed && !reserved);
     if(!motor(output.motor,input.encoderPosition)) output=machine.fault(
 #ifdef MOTOR_INHIBITED
       "Bench: motor inhibited"
@@ -177,7 +186,7 @@ void control(void *) {
     s.openingRetryPaused=machine.retryPaused();s.openingRetryActive=machine.retryActive();
     s.closedCueEligible=machine.closedCueEligible();s.openingThreshold=machine.openingThreshold();
     s.mcpHealthy=mcpHealthy;s.upButton=upButton;s.downButton=downButton;
-    s.energized=input.energized;s.healthy=input.ticHealthy;s.maintenance=reserved;s.upOutput=up;s.downOutput=down;
+    s.energized=input.energized;s.healthy=input.ticHealthy;s.maintenance=reserved || machine.updating();s.upOutput=up;s.downOutput=down;
     s.encoderPosition=input.encoderPosition;s.encoderCounts=counts;s.motorPosition=input.motorPosition;s.targetPosition=input.targetPosition;
     s.pendingClosed=closed.pending();s.pendingAgeMs=closed.age(now);s.pendingGeneration=closed.generation();s.cycles=cycles;s.lostLiveEvents=losses;
     strlcpy(s.fault,machine.faultReason(),sizeof(s.fault));
@@ -218,4 +227,6 @@ void doorAcknowledgeClosed(uint32_t g) {portENTER_CRITICAL(&sharedMux);ack=true;
 bool doorReserve(bool motion) {Request r{};r.type=RequestType::Reserve;r.changingMotion=motion;return exchange(r);}
 bool doorCommit(const MotionConfig &m,uint32_t expiry) {Request r{};r.type=RequestType::Commit;r.motion=m;r.expiry=expiry;return exchange(r);}
 void doorReleaseReservation() {Request r{};r.type=RequestType::Release;exchange(r);}
+bool doorBeginUpdate() {Request r{};r.type=RequestType::Update;return exchange(r);}
+void doorEndUpdate() {Request r{};r.type=RequestType::EndUpdate;exchange(r);}
 void doorNetworkStatus(bool net,bool q,IPAddress ip) {portENTER_CRITICAL(&sharedMux);networkReady=net;qlabReady=q;networkIP=static_cast<uint32_t>(ip);portEXIT_CRITICAL(&sharedMux);}

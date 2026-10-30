@@ -25,4 +25,7 @@ void doorAcknowledgeClosed(uint32_t generation);
 bool doorReserve(bool changingMotion);
 bool doorCommit(const MotionConfig &, uint32_t closedExpiryMs);
 void doorReleaseReservation();
+// Update hold has no settings-reservation timeout. Failure leaves a latched fault.
+bool doorBeginUpdate();
+void doorEndUpdate();
 void doorNetworkStatus(bool ready, bool qlab, IPAddress ip);

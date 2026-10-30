@@ -2,9 +2,13 @@
 #include "Types.h"
 class DoorMachine {
 public:
-  DoorMachine(const MotionConfig &m, bool /*rear*/) : motion_(m) {}
-  DoorOutput tick(const DoorInput &, bool openRequested = false, bool resetFault = false);
+  DoorMachine(const MotionConfig &m, bool rear) : motion_(m), autoOpenEnabled_(!rear), autoOpenArmed_(!rear) {}
+  DoorOutput tick(const DoorInput &, bool openRequested = false, bool resetFault = false,
+                  bool allowAutomaticOpen = true);
   DoorOutput fault(const char *reason);
+  DoorOutput beginUpdate() { updating_ = true; return fault("Firmware update; reset required"); }
+  void endUpdate() { updating_ = false; }
+  bool updating() const { return updating_; }
   DoorState state() const { return state_; }
   bool homed() const { return homed_; }
   uint8_t openingRetries() const { return retries_; }
@@ -14,10 +18,13 @@ public:
   int32_t openingThreshold() const { return motion_.travel-motion_.openCompletionTolerance; }
   const char *faultReason() const { return fault_; }
   bool canTune(const DoorInput &i) const { return i.ticHealthy && state_ == DoorState::Closed && homed_ && i.limit && !i.energized; }
-  bool canMaintain(const DoorInput &i) const { return i.ticHealthy && !i.energized && (canTune(i) || state_ == DoorState::Unknown || state_ == DoorState::Fault); }
+  bool canMaintain(const DoorInput &i) const { return !updating_ && i.ticHealthy && !i.energized && (canTune(i) || state_ == DoorState::Unknown || state_ == DoorState::Fault); }
   void tune(const MotionConfig &m) { motion_ = m; }
 private:
   MotionConfig motion_;
+  const bool autoOpenEnabled_;
+  bool autoOpenArmed_;
+  bool updating_ = false;
   bool homed_ = false, cycle_ = false, qualified_ = false, lastLimit_ = false;
   bool retryPaused_ = false, retryActive_ = false;
   uint8_t retries_ = 0;

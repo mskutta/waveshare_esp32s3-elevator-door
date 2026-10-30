@@ -33,10 +33,10 @@ MotorSettings motorSettings(const MotionConfig &m,MotorAction action) {
   bool reopen=action==MotorAction::Reopen || action==MotorAction::RetryReopen;
   bool opening=action==MotorAction::Open || reopen || retry;
   bool home=action==MotorAction::Home;
-  uint32_t divisor=retry?m.openRetryDivisor:1;
+  double divisor=retry?m.openRetryDivisor:1;
   return {opening,home,
-    home?m.homingSpeed:opening?(reopen?m.reopenSpeed:m.openSpeed)/divisor:m.closeSpeed,
-    home?m.homingAccel:opening?m.openAccel/divisor:m.closeAccel,
+    home?m.homingSpeed:opening?static_cast<uint32_t>((reopen?m.reopenSpeed:m.openSpeed)/divisor):m.closeSpeed,
+    home?m.homingAccel:opening?static_cast<uint32_t>(m.openAccel/divisor):m.closeAccel,
     home?m.homingDecel:opening?m.openDecel:m.closeDecel,
     home?m.homingCurrent:opening?m.openCurrent:m.closeCurrent};
 }
@@ -52,11 +52,14 @@ bool validateConfig(const AppConfig &c, const char *&error) {
   if (m.settleMs > 5000) return false;
   for (auto v : {m.openTimeoutMs, m.closeTimeoutMs, m.homingTimeoutMs}) if (v < 100 || v > 600000) return false;
   error = "invalid opening retry/completion settings";
-  if(m.openRetryLimit>10 || m.openRetryDivisor<1 || m.openRetryDivisor>10 ||
+  if(m.openRetryLimit>10 || !isfinite(m.openRetryDivisor) || m.openRetryDivisor<1 || m.openRetryDivisor>10 ||
      m.openRetryPauseMs<100 || m.openRetryPauseMs>5000 ||
      m.openCompletionTolerance<1 || m.openCompletionTolerance>m.travel/20) return false;
-  if(m.openRetryLimit && (m.openSpeed/m.openRetryDivisor<10000 ||
-     m.reopenSpeed/m.openRetryDivisor<10000 || m.openAccel/m.openRetryDivisor<100)) return false;
+  if(m.openRetryLimit) {
+    auto open=motorSettings(m,MotorAction::RetryOpen);
+    auto reopen=motorSettings(m,MotorAction::RetryReopen);
+    if(open.speed<10000 || reopen.speed<10000 || open.acceleration<100) return false;
+  }
   error = "invalid motion settings";
   // Reject deadlines below even an ideal, zero-start-speed trapezoidal move.
   auto minimumMs = [&](uint32_t speed, uint32_t accel, uint32_t decel) {

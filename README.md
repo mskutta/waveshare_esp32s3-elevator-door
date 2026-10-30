@@ -2,7 +2,7 @@
 
 PlatformIO/Arduino firmware for **two separate controllers**, built as `frontdoor` and `reardoor`. Target: Waveshare ESP32-S3-POE-ETH / ESP32-S3-ETH, ESP32-S3R8 + W5500, 16 MB flash and 8 MB PSRAM. Use local controller power and Ethernet for data. No camera is attached.
 
-The Tic T500, encoder, OLED, closed switch, beam sensor, and existing lighting drivers remain. The 5 V MCP23008 is retained for front button inputs and lighting drivers, on the existing level-shifted I²C bus shared with the Tic. Limit and beam contacts use ESP32 GPIO. Wi-Fi and Bluetooth radios are disabled; MQTT, Wi-Fi provisioning, and OTA are absent. The Arduino `WiFi` library still appears in the dependency graph for radio-disable calls and the framework's shared Ethernet interface registration; no wireless connection or access point is started. OSC and HTTP use nonblocking lwIP sockets.
+The Tic T500, encoder, OLED, closed switch, beam sensor, and existing lighting drivers remain. The 5 V MCP23008 is retained for front button inputs and lighting drivers, on the existing level-shifted I²C bus shared with the Tic. Limit and beam contacts use ESP32 GPIO. Wi-Fi and Bluetooth radios are disabled; MQTT and Wi-Fi provisioning are absent. Firmware updates use Ethernet HTTP. The Arduino `WiFi` library still appears in the dependency graph for radio-disable calls and the framework's shared Ethernet interface registration; no wireless connection or access point is started. OSC and HTTP use nonblocking lwIP sockets.
 
 ## Build and USB upload
 
@@ -24,9 +24,34 @@ pio run -e frontdoor -t upload --upload-port /dev/cu.usbmodemYOURPORT
 # Use -e reardoor for the other controller.
 ```
 
-Use a data-capable USB-C cable. If automatic upload cannot enter the bootloader, hold BOOT, tap RESET, release BOOT, and retry. USB enumeration can change between bootloader and running firmware. Upload does not erase NVS settings. There is no OTA endpoint.
+Use a data-capable USB-C cable. If automatic upload cannot enter the bootloader, hold BOOT, tap RESET, release BOOT, and retry. USB enumeration can change between bootloader and running firmware. Upload does not erase NVS settings. Install this OTA-capable version and its new partition table once over USB; later updates use Ethernet as described below.
 
 Exact dependencies: Espressif32 platform 6.13.0, Arduino-ESP32 2.0.17 from that platform, Tic 2.2.0, SSD1306Ascii 1.3.5, ArduinoJson 7.4.3. The supplied SpookMMWave custom board and W5500 integration are the starting point. The application/network task runs on core 0; the higher-priority motor task and PCNT ISR run on core 1.
+
+## Firmware updates over Ethernet
+
+After the one-time USB installation of this version, open the controller's IP address in a browser and use **Firmware update → Upload firmware over Ethernet**. Build the correct environment and select its application image:
+
+```sh
+pio run -e frontdoor
+# Select .pio/build/frontdoor/firmware.bin for the front controller.
+# Build/select reardoor for the rear controller, or bench for motor-inhibited testing.
+```
+
+Use this project's matching door image. Do not upload `bootloader.bin`, `partitions.bin`, a merged flash image, or the linear actuator firmware. The updater checks ESP image validity; it does not identify the project's door profile for you.
+
+Upload immediately stops/releases the motor and clears pending cues. Flash writing begins only after the Tic confirms release. A separate update hold blocks open commands, fault resets, automatic opening, and configuration saves throughout the upload; it does not expire like a settings reservation. Successful installation reboots after the response. Normal startup behavior applies: **the front door automatically opens after homing**, including if already closed at reboot. QLab opening events follow their normal readiness rules. NVS tuning and cue mappings are retained.
+
+A failed, disconnected, or timed-out upload does not reboot or activate the incomplete image. The running firmware remains available, with movement faulted until an explicit fault reset and closed-position confirmation. You may retry the upload first. The front door automatically opens after recovery and homing. Uploads allow 120 seconds total and stream into the inactive app slot without buffering the image in RAM. Only one HTTP client is served at a time, so status polling pauses during an upload.
+
+The same endpoint supports a command-line upload:
+
+```sh
+curl --fail --show-error -H 'Expect:' -H 'Content-Type: application/octet-stream' \
+  --upload-file .pio/build/frontdoor/firmware.bin http://10.81.95.25/api/update
+```
+
+`PUT /api/update` requires a nonzero Content-Length and `application/octet-stream`, with a 7 MiB maximum. Chunked uploads are rejected. Upload endpoints have the same unauthenticated access as the existing web controls; use the intended show-control network. OTA cannot change the partition table. The supplied 16 MB layout uses two 7 MiB application slots and preserves the existing NVS address/size.
 
 ## Configure
 
@@ -43,7 +68,9 @@ Ethernet always obtains its address through DHCP; there are no controller-side I
 
 ## Door operation
 
-Startup releases the motor. An active closed switch confirms position without starting any QLab cue. Otherwise manually close the door. Remote open commands are ignored until position is confirmed.
+Startup releases the motor. An active closed switch confirms position; otherwise manually close the door to establish the encoder reference. Remote open commands are ignored until position is confirmed. The front door automatically starts one normal opening cycle after its first position confirmation at boot and again after a fault reset followed by position confirmation. This sends the normal enabled `open`/`opening` QLab events when QLab is ready; offline opening events are discarded as usual. Rear-door position confirmation does not automatically open. Automatic opening waits for any settings reservation to end.
+
+Once homed, both doors retain their position reference while powered, including when manually moved off the closed switch. An open request then starts from the current encoder position and targets the normal full-open position. Manual movement alone does not start a cycle or its closing timer. Each valid return to the closed switch re-zeros the encoder without producing a closed cue for manual movement. Faults and reboot invalidate homing. The `closed` state also represents homed idle after manual movement: check `limit` for physical closure and `homed` for a valid position reference.
 
 The web **Open door (test)** button sends the same open request as QLab. It uses the normal door cycle, lighting, and configured event cues; it does not bypass position confirmation, fault handling, or maintenance reservations. The `bench` build still inhibits movement.
 
@@ -55,7 +82,7 @@ An opening succeeds only after the closed switch releases and encoder position r
 
 The configurable `beam_break` QLab event fires once per fresh obstruction only in `unknown` before the first closed-position confirmation after boot. It is suppressed during faults and permanently after initialization until reboot. An already-blocked beam must clear first; offline breaks are discarded.
 
-Beam and encoder drift handling remain local. Network outages do not stop local motion or automatically open the door. The beam takes priority over an expired dwell and prevents starting a close while broken. Beam obstruction during final closing homing stops/releases and faults. Tic communications, opening/closing deadlines, and homing deadlines latch faults. Fault reset does not move the door; closed-position confirmation is required again. Never feed the Tic command watchdog while faulted.
+Beam and encoder drift handling remain local. Network outages do not stop local motion or automatically open the door. The beam takes priority over an expired dwell and prevents starting a close while broken. Beam obstruction during final closing homing stops/releases and faults. Tic communications, opening/closing deadlines, and homing deadlines latch faults. Fault reset requires closed-position confirmation again. For the front door, that confirmation schedules a normal automatic opening, including when the switch is already active at reset. Never feed the Tic command watchdog while faulted.
 
 ## OSC/TCP and QLab
 
@@ -76,7 +103,7 @@ Only the **closed** trigger has one pending RAM slot. It is created only after a
 python3 scripts/test_native.py
 ```
 
-Requires a C++17 compiler and the front-door dependencies installed by `pio run -e frontdoor`. Tests compile the actual portable state machine, configuration codec/storage wrapper, TCP module, and HTTP API with AddressSanitizer/UndefinedBehaviorSanitizer. A local TCP QLab mock verifies handshake, fragmentation, cue acknowledgment, retries, reconnection, and cancellation. HTTP tests verify configuration guards, rollback, and rejection of static-IP overrides. Motion tests cover opening qualification, bounded retries, shared reopening budget, beam behavior, faults, and deadline rollover. Configuration tests verify retry-setting validation and migration of versions 1/2/3 for both doors. Host OSC tests use an automatically assigned TCP port so they can run alongside QLab. HTTP tests briefly listen on TCP 80; stop other services on that port before running them. The fake Preferences backend tests persistence errors and corruption; physical ESP32 NVS still needs commissioning verification.
+Requires a C++17 compiler and the front-door dependencies installed by `pio run -e frontdoor`. Tests compile the actual portable state machine, configuration codec/storage wrapper, TCP module, and HTTP API with AddressSanitizer/UndefinedBehaviorSanitizer. A local TCP QLab mock verifies handshake, fragmentation, cue acknowledgment, retries, reconnection, and cancellation. HTTP tests verify configuration guards, rollback, rejection of static-IP overrides, streaming firmware larger than the JSON buffer, failed release/flash/validation, disconnect/link loss, timeout cleanup, and delayed reboot. Portable state-machine tests verify the update hold prevents reset/motion beyond the normal reservation timeout. Motion tests cover opening qualification, bounded retries, shared reopening budget, beam behavior, faults, and deadline rollover. Configuration tests verify retry-setting validation and migration of versions 1/2/3 for both doors. Host OSC tests use an automatically assigned TCP port so they can run alongside QLab. HTTP tests briefly listen on TCP 80; stop other services on that port before running them. The fake Preferences backend tests persistence errors and corruption; physical ESP32 NVS still needs commissioning verification.
 
 Both production builds and `bench` compile, and the native suite passes. **Physical upload, electrical levels, pulse-counter behavior under load, door movement, and actual QLab 5 integration have not been verified.** No ESP32 USB device was attached during implementation. Follow [wiring](docs/WIRING.md) and [commissioning](docs/COMMISSIONING.md) before powering the motor.
 
@@ -89,6 +116,6 @@ Both production builds and `bench` compile, and the native suite passes. **Physi
 - `src/Ethernet.cpp`, `src/OscTcp.cpp`: W5500/lwIP Ethernet and nonblocking TCP sockets. DNS lookup runs only on the network core.
 - `src/Config.cpp`, `src/WebUI.cpp`: versioned JSON in per-door NVS namespaces and the embedded web page.
 
-HTTP: `GET /api/state`, `GET /api/config`, full-document `PUT /api/config` (schema version 4; JSON Content-Type; maximum body 8192 bytes), and body-free `POST /api/door/open` and `POST /api/fault/reset`. The open endpoint returns 202 when the request is submitted, not proof of movement; the door-control task applies normal command/state checks. Headers are limited to 2048 bytes; duplicate Content-Length, chunked transfer, and oversized requests are rejected before JSON allocation. One client is served at a time, with a five-second total connection deadline and bounded receive/transmit work per loop. Malformed configuration returns 400; incompatible controller state or persistence failure returns 409. Configurations are validated before saving. Keep a downloaded `/api/config` copy as a backup.
+HTTP: `PUT /api/update` (streamed binary firmware, described above), `GET /api/state`, `GET /api/config`, full-document `PUT /api/config` (schema version 4; JSON Content-Type; maximum body 8192 bytes), and body-free `POST /api/door/open` and `POST /api/fault/reset`. The open endpoint returns 202 when the request is submitted, not proof of movement; the door-control task applies normal command/state checks. Headers are limited to 2048 bytes; duplicate Content-Length, chunked transfer, and oversized requests are rejected before JSON allocation. One client is served at a time, with a five-second request deadline (120 seconds for firmware uploads), a separate five-second response deadline, and bounded receive/transmit work per loop. Malformed configuration returns 400; incompatible controller state or persistence failure returns 409. Configurations are validated before saving. Keep a downloaded `/api/config` copy as a backup.
 
 The two supplied reference projects are unchanged.
