@@ -4,8 +4,11 @@ class DoorMachine {
 public:
   DoorMachine(const MotionConfig &m, bool rear) : motion_(m), autoOpenEnabled_(!rear), autoOpenArmed_(!rear) {}
   DoorOutput tick(const DoorInput &, bool openRequested = false, bool resetFault = false,
-                  bool allowAutomaticOpen = true);
-  DoorOutput fault(const char *reason);
+                  bool allowAutomaticActions = true);
+  DoorOutput fault(const char *reason, bool allowSwitchRecovery = true);
+  // Called when runtime hardware checks prevent a tick. Do not retain a closure
+  // across unhealthy hardware, an update hold, or a settings reservation.
+  void cancelSwitchRecovery() { recoveryReleased_ = recoveryTiming_ = false; }
   DoorOutput beginUpdate() { updating_ = true; return fault("Firmware update; reset required"); }
   void endUpdate() { updating_ = false; }
   bool updating() const { return updating_; }
@@ -25,6 +28,8 @@ private:
   const bool autoOpenEnabled_;
   bool autoOpenArmed_;
   bool updating_ = false;
+  bool switchRecoveryAllowed_ = true, recoveryReleased_ = false, recoveryTiming_ = false;
+  uint32_t recoveryClosedAt_ = 0;
   bool homed_ = false, cycle_ = false, qualified_ = false, lastLimit_ = false;
   bool retryPaused_ = false, retryActive_ = false;
   uint8_t retries_ = 0;

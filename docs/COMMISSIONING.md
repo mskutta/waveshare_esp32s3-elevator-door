@@ -44,7 +44,7 @@ Software verification completed: `frontdoor`, `reardoor`, and motor-inhibited `b
 
 Record measured encoder direction/rate, voltages, full-travel timing, tuned values, firmware environment, QLab version/workspace ID, and acceptance results for each physical door. Back up the final `/api/config` JSON.
 
-With motor power inhibited, disconnect the MCP23008 to verify a latched communication fault, requested motor release, and closed-trigger cancellation. Restore the bus and verify automatic expander initialization leaves outputs off; use web fault reset and manual closed confirmation before operation. Verify actual driver behavior if the expander loses communication while an output is active; its latch may retain that level.
+With motor power inhibited, disconnect the MCP23008 to verify a latched communication fault, requested motor release, and closed-trigger cancellation. Restore the bus and verify automatic expander initialization leaves outputs off; once the bus is healthy and motor released, verify a fresh manual closure held 100 ms clears the fault and re-zeros the encoder. A switch held through the fault must not reset it. Verify web reset still works. Verify actual driver behavior if the expander loses communication while an output is active; its latch may retain that level.
 
 ## Beam-break cue before initialization
 
@@ -54,6 +54,13 @@ With the motor released, leave the closed switch inactive and configure the mast
 
 1. Back up `/api/config`. Install this version and its two-slot partition table once over USB. Reload the page and confirm the Firmware update section appears. Verify saved tuning and QLab mappings remain intact.
 2. With the mechanism prepared for normal front-door startup opening, upload the matching environment's `firmware.bin` through the web page. Confirm motor release precedes flash writes, commands/reset cannot restart motion during upload, and successful installation replies then reboots. Confirm settings survive, Ethernet reconnects, and normal homing/opening/events resume. Repeat an Ethernet upload to exercise the other application slot.
-3. Start another upload and interrupt Ethernet or the browser connection. Confirm no reboot, no motor restart, and an update fault that requires explicit reset and homing. Retry an upload before recovery. Test invalid images and release refusal without changing the active image. Confirm bench firmware continues to inhibit energization after an update.
+3. Start another upload and interrupt Ethernet or the browser connection. Confirm no reboot, no motor restart, and an update fault that requires web reset and homing or, after the update hold ends, a fresh manual closure held 100 ms. Retry an upload before recovery. Test invalid images and release refusal without changing the active image. Confirm bench firmware continues to inhibit energization after an update.
 
 Host tests simulate flash writes and reboot; actual flash, interruption recovery, and repeated slot switching require these hardware checks.
+
+## Manual closure fault recovery
+
+1. On each door, induce a controlled recoverable fault, then restore healthy hardware and confirm the motor is released. If the closed switch is held, verify the fault stays latched indefinitely. Release it, then manually close: less than 100 ms must not reset; a continuous 100 ms must clear the fault and zero the encoder without a closed-cycle cue.
+2. Confirm front recovery starts one normal opening on the next control tick, with configured opening events when QLab is ready. Rear recovery must remain idle and homed. Confirm a subsequent fault requires a fresh release/closure again.
+3. Verify unhealthy Tic/MCP23008, invalid encoder status, and an energized motor prevent manual recovery. A closure during a settings reservation or firmware upload must not be replayed after the hold ends; release and close again. After a failed upload, confirm fresh closure recovery works only after the upload hold ends.
+4. In bench, confirm manual closure cannot clear the motor-inhibition fault or energize the motor. Verify the web reset path remains available. Host tests cover the portable recovery logic; verify real switch bounce and actual hardware health/release on the installed controllers.

@@ -1,17 +1,28 @@
 #include "DoorMachine.h"
 #include <stdlib.h>
-DoorOutput DoorMachine::fault(const char *reason) {
+DoorOutput DoorMachine::fault(const char *reason, bool allowSwitchRecovery) {
   DoorOutput o; o.motor = MotorAction::Release; o.changed = state_ != DoorState::Fault;
   state_ = DoorState::Fault; fault_ = reason; homed_ = false; cycle_ = qualified_ = false;
   autoOpenArmed_ = autoOpenEnabled_;
+  switchRecoveryAllowed_ = allowSwitchRecovery;cancelSwitchRecovery();
   retryPaused_ = retryActive_ = false; return o;
 }
-DoorOutput DoorMachine::tick(const DoorInput &i, bool open, bool reset, bool allowAutomaticOpen) {
+DoorOutput DoorMachine::tick(const DoorInput &i, bool open, bool reset, bool allowAutomaticActions) {
   DoorOutput o;
+  if (!i.ticHealthy || i.energized || updating_ || !allowAutomaticActions) cancelSwitchRecovery();
   if (!i.ticHealthy) return state_ == DoorState::Fault ? o : fault("Tic communication");
   if (updating_) return o; // Upload holds motion/reset inhibited until explicitly released.
   if (state_ == DoorState::Fault) {
-    if (!reset || i.energized) return o;
+    bool switchReset = false;
+    if (allowAutomaticActions && switchRecoveryAllowed_ && !i.energized) {
+      if (!i.limit) { recoveryReleased_ = true; recoveryTiming_ = false; }
+      else if (recoveryReleased_) {
+        if (!recoveryTiming_) { recoveryTiming_ = true; recoveryClosedAt_ = i.now; }
+        switchReset = elapsed(i.now,recoveryClosedAt_) >= 100;
+      }
+    }
+    if ((!reset && !switchReset) || i.energized) return o;
+    cancelSwitchRecovery();retries_ = 0;
     fault_ = ""; lastLimit_ = false; enter(DoorState::Unknown, i.now, o);
   }
   // An active switch at boot confirms position. During opening it must first
@@ -34,7 +45,7 @@ DoorOutput DoorMachine::tick(const DoorInput &i, bool open, bool reset, bool all
   auto prepare = [&](bool reopen) { o.motor = MotorAction::Release; enter(reopen ? DoorState::Reopen : DoorState::Open,i.now,o); };
   switch (state_) {
     case DoorState::Closed:
-      if (open || (autoOpenArmed_ && allowAutomaticOpen)) {
+      if (open || (autoOpenArmed_ && allowAutomaticActions)) {
         autoOpenArmed_ = false;
         cycle_ = true; qualified_ = false;retries_ = 0;retryPaused_ = retryActive_ = false;prepare(false);
       }

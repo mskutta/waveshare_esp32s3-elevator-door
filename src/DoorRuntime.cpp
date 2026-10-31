@@ -90,7 +90,7 @@ void control(void *) {
   while(true) {
     uint32_t now=millis();
     // Poll at 20 Hz; failed devices get bounded retries at 1 Hz. Recovery
-    // reinitializes outputs off but still requires an operator fault reset.
+    // reinitializes outputs off; recovery needs a fresh manual closure or web reset.
     if(elapsed(now,mcpAt)>=(mcpHealthy?50u:1000u)) {
       mcpAt=now;
       if(!mcpHealthy) mcpHealthy=mcp.begin();
@@ -136,12 +136,13 @@ void control(void *) {
       Reply reply{r.id,ok};xQueueSend(replies,&reply,0);
     }
     DoorOutput output;
+    if(!mcpHealthy || !encoderOK || !scaleOK) machine.cancelSwitchRecovery();
     if(!mcpHealthy) output=machine.state()==DoorState::Fault?DoorOutput{}:machine.fault("MCP23008 communication");
     else if(!encoderOK || !scaleOK) output=machine.fault(!encoderOK?"Encoder initialization":"Encoder range");
     else output=machine.tick(input,commandsAllowed && !reserved && (commands&1),commandsAllowed && !reserved && (commands&2),commandsAllowed && !reserved);
     if(!motor(output.motor,input.encoderPosition)) output=machine.fault(
 #ifdef MOTOR_INHIBITED
-      "Bench: motor inhibited"
+      "Bench: motor inhibited",false
 #else
       "Tic communication"
 #endif

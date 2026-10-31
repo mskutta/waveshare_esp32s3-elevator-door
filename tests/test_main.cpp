@@ -153,6 +153,74 @@ static void homingMemoryTests() {
   o=front.tick(i,true);assert(!o.changed&&o.motor==MotorAction::None);
   std::cout<<"PASS homing memory, manual movement, first-home/recovery auto-open, rear isolation, maintenance deferral and normal events\n";
 }
+static void manualRecoveryTests() {
+  for(bool rear:{false,true}) for(uint32_t origin:{1000u,0xffffffc0u}) {
+    auto m=defaultConfig(rear).motion;DoorMachine door(m,rear);auto i=input(origin);
+    // Fault a qualified opening that used a retry: recovery must discard the cycle.
+    i.limit=true;door.tick(i);door.tick(i,true);i.now+=m.settleMs;door.tick(i);
+    i.limit=false;i.targetPosition=m.travel;i.motorPosition=256;++i.now;door.tick(i);
+    assert(door.openingRetries()==1);i.now+=m.openRetryPauseMs;door.tick(i);
+    i.motorPosition=i.encoderPosition=m.travel;++i.now;door.tick(i);
+    assert(door.closedCueEligible());door.fault("test fault");assert(!door.closedCueEligible());
+    // A held switch cannot reset a fault, regardless of how long it is held.
+    i.limit=true;i.energized=false;door.tick(i);i.now+=1000;
+    auto o=door.tick(i,true);assert(door.state()==DoorState::Fault&&!o.zeroEncoder);
+    i.limit=false;++i.now;door.tick(i);
+    i.limit=true;++i.now;door.tick(i);i.now+=99;o=door.tick(i);
+    assert(door.state()==DoorState::Fault&&!o.zeroEncoder);
+    // Bounce restarts the full confirmation period.
+    i.limit=false;++i.now;door.tick(i);i.limit=true;++i.now;door.tick(i);
+    i.now+=99;o=door.tick(i);assert(door.state()==DoorState::Fault&&!o.zeroEncoder);
+    ++i.now;o=door.tick(i,true);
+    assert(o.zeroEncoder&&!o.closedCycle&&o.motor==MotorAction::Release&&o.changed);
+    assert(door.state()==DoorState::Closed&&door.homed()&&!strcmp(door.faultReason(),""));
+    assert(door.openingRetries()==0&&!door.closedCueEligible()&&!door.retryActive()&&!door.retryPaused());
+    i.encoderPosition=0;++i.now;o=door.tick(i);
+    assert(door.state()==(rear?DoorState::Closed:DoorState::Open));
+    assert(o.changed==!rear&&!o.closedCycle);
+    if(!rear) {
+      assert(!strcmp(eventName(static_cast<size_t>(door.state())),"open"));
+      i.now+=m.settleMs;o=door.tick(i);
+      assert(o.motor==MotorAction::Open&&o.changed&&door.state()==DoorState::Opening);
+    }
+    // Another fault needs another release: an already-held switch never loops.
+    door.fault("test fault");i.now+=1000;door.tick(i);
+    assert(door.state()==DoorState::Fault&&!door.homed());
+  }
+  for(bool rear:{false,true}) {
+    auto m=defaultConfig(rear).motion;
+    for(int blocker=0;blocker<4;++blocker) {
+      DoorMachine door(m,rear);auto i=input();door.fault("test fault");
+      door.tick(i);i.limit=true;++i.now;door.tick(i); // closure started
+      i.now+=50;
+      if(blocker==0) {i.ticHealthy=false;door.tick(i);i.ticHealthy=true;}
+      if(blocker==1) {i.energized=true;door.tick(i);i.energized=false;}
+      if(blocker==2) door.tick(i,false,false,false); // settings reservation
+      if(blocker==3) door.cancelSwitchRecovery(); // runtime MCP/encoder failure skips tick
+      i.now+=1000;auto o=door.tick(i);
+      assert(door.state()==DoorState::Fault&&!o.zeroEncoder); // no deferred closure
+      i.limit=false;++i.now;door.tick(i);i.limit=true;++i.now;door.tick(i);
+      i.now+=100;o=door.tick(i);assert(o.zeroEncoder&&door.homed()&&!o.closedCycle);
+    }
+    // Upload closures are discarded, including a switch released during the hold.
+    DoorMachine door(m,rear);auto i=input();door.beginUpdate();door.tick(i);
+    i.limit=true;++i.now;door.tick(i);i.now+=1000;door.tick(i);
+    assert(door.updating()&&!door.homed());door.endUpdate();
+    i.now+=1000;door.tick(i);assert(door.state()==DoorState::Fault);
+    i.limit=false;++i.now;door.tick(i);i.limit=true;++i.now;door.tick(i);
+    i.now+=100;auto o=door.tick(i);assert(o.zeroEncoder&&door.homed()&&!o.closedCycle);
+    // Bench faults never gain switch recovery, but explicit web reset still works.
+    DoorMachine bench(m,rear);bench.fault("Bench: motor inhibited",false);i=input();bench.tick(i);
+    i.limit=true;++i.now;bench.tick(i);i.now+=1000;o=bench.tick(i);
+    assert(bench.state()==DoorState::Fault&&!o.zeroEncoder);
+    o=bench.tick(i,false,true);assert(o.zeroEncoder&&bench.homed());
+  }
+  // Debounce is rollover-safe even when its 100 ms interval crosses UINT32_MAX.
+  DoorMachine rollover(defaultConfig(true).motion,true);auto i=input(0xffffffc0u);
+  rollover.fault("test fault");rollover.tick(i);i.limit=true;rollover.tick(i);
+  i.now+=99;assert(!rollover.tick(i).zeroEncoder);++i.now;assert(rollover.tick(i).zeroEncoder);
+  std::cout<<"PASS fresh manual closure fault recovery, 100ms debounce, rollover, hardware/maintenance/upload guards, bench protection and recovery events\n";
+}
 static void stateTests() {
   for(bool rear:{false,true}) {
     auto c=defaultConfig(rear);const char *error;assert(validateConfig(c,error));
@@ -822,4 +890,4 @@ static void mcpTests() {
   }
   std::cout<<"PASS MCP23008 safe startup, both door mappings/polarities, button inputs, NACK/short-read failure and recovery\n";
 }
-int main(){mcpTests();stateTests();homingMemoryTests();beamBreakTests();openingRetryTests();configTests();codecTests();triggerTests();httpParserTests();updateInterlockTests();tcpIntegration(true);tcpIntegration(false);webIntegration();webUpdateIntegration();std::cout<<"All native tests passed.\n";}
+int main(){mcpTests();stateTests();homingMemoryTests();manualRecoveryTests();beamBreakTests();openingRetryTests();configTests();codecTests();triggerTests();httpParserTests();updateInterlockTests();tcpIntegration(true);tcpIntegration(false);webIntegration();webUpdateIntegration();std::cout<<"All native tests passed.\n";}

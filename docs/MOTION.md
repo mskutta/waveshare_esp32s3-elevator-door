@@ -13,7 +13,7 @@ Defaults are taken from the ESP8266 firmware, with opening acceleration restored
 - Requested current: opening/homing **1,500 mA**; closing **900 mA**. The T500 chooses its nearest supported current at or below the request; these requests become 1,452 mA and 880 mA with the pinned library.
 - Normal dwell: front **600,000 ms**, rear **5,000 ms**. Short dwell **2,000 ms**; settle **250 ms**.
 - Opening/closing deadline: **30,000 ms** each. Homing deadline **5,000 ms**.
-- Closing drift threshold **64 microsteps**; opening drift threshold **128 microsteps**.
+- Closing drift threshold **128 microsteps**; opening drift threshold **128 microsteps**.
 - Opening completion tolerance **128 microsteps**: encoder threshold **18,472** at default travel.
 - Opening retry limit **10**, release pause **1,000 ms**, speed/acceleration divisor **3**.
 
